@@ -1,0 +1,22 @@
+# Generated files
+data/
+output/
+*.db
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.eggs/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+
+# Logs
+*.log
