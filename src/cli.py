@@ -220,5 +220,77 @@ def search(query: str, db: Path, limit: int):
         click.echo()
 
 
+@cli.command("merge-extractions")
+@click.argument("graph_path", type=click.Path(exists=True, path_type=Path))
+@click.argument("extractions_path", type=click.Path(exists=True, path_type=Path))
+@click.option(
+    "--output",
+    "-o",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Output path for merged graph (default: overwrite input)",
+)
+def merge_extractions(graph_path: Path, extractions_path: Path, output: Path | None):
+    """Merge extracted entities and relationships into the graph."""
+    from .extraction import ExtractionReader, ExtractionMerger
+
+    # Show extraction stats
+    click.echo(f"Reading extractions from: {extractions_path}")
+    reader = ExtractionReader(extractions_path)
+    ext_stats = reader.get_stats()
+    click.echo(f"  Total extractions: {ext_stats['total_extractions']}")
+    click.echo(f"  With note path: {ext_stats['with_path']}")
+    click.echo(f"  Entities: {ext_stats['total_entities']}")
+    click.echo(f"  Relationships: {ext_stats['total_relationships']}")
+
+    # Load graph
+    click.echo(f"\nLoading graph from: {graph_path}")
+    graph = VaultGraph.load(graph_path)
+    before_stats = graph.get_stats()
+    click.echo(f"  Before: {before_stats.nodes} nodes, {before_stats.edges} edges")
+
+    # Merge
+    click.echo("\nMerging extractions...")
+    merger = ExtractionMerger(graph)
+    extractions = reader.read_all()
+    merge_stats = merger.merge_all(extractions)
+    click.echo(merge_stats)
+
+    # After stats
+    after_stats = graph.get_stats()
+    click.echo(f"\nAfter merge:")
+    click.echo(after_stats)
+
+    # Save
+    output_path = output or graph_path
+    graph.save(output_path)
+    click.echo(f"\nSaved merged graph to: {output_path}")
+
+
+@cli.command("extraction-stats")
+@click.argument("extractions_path", type=click.Path(exists=True, path_type=Path))
+def extraction_stats(extractions_path: Path):
+    """Show statistics about extraction file."""
+    from .extraction import ExtractionReader
+
+    reader = ExtractionReader(extractions_path)
+    stats = reader.get_stats()
+
+    click.echo(f"Extraction Stats for: {extractions_path}\n")
+    click.echo(f"Total extractions: {stats['total_extractions']}")
+    click.echo(f"  With path: {stats['with_path']}")
+    click.echo(f"  Without path: {stats['without_path']}")
+    click.echo(f"\nTotal entities: {stats['total_entities']}")
+    click.echo(f"Total relationships: {stats['total_relationships']}")
+
+    click.echo("\nEntity types:")
+    for etype, count in sorted(stats["entity_types"].items(), key=lambda x: -x[1]):
+        click.echo(f"  {etype}: {count}")
+
+    click.echo("\nRelation types:")
+    for rtype, count in sorted(stats["relation_types"].items(), key=lambda x: -x[1]):
+        click.echo(f"  {rtype}: {count}")
+
+
 if __name__ == "__main__":
     cli()
