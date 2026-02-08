@@ -34,7 +34,6 @@ class ParsedNote:
 FRONTMATTER_PATTERN = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 WIKILINK_PATTERN = re.compile(r"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]")
 TAG_PATTERN = re.compile(r"(?:^|\s)#([a-zA-Z0-9_/-]+)")
-FRONTMATTER_TAG_PATTERN = re.compile(r"^\s*-?\s*['\"]?([a-zA-Z0-9_/-]+)['\"]?\s*$")
 
 
 def parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:

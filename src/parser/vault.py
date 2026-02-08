@@ -1,13 +1,14 @@
 """Vault traversal and indexing."""
 
-from dataclasses import dataclass
+import logging
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
 
 from .markdown import ParsedNote, parse_note
 
+log = logging.getLogger(__name__)
 
-# Folders to exclude from indexing
 DEFAULT_EXCLUDED = {
     ".obsidian",
     ".git",
@@ -24,11 +25,7 @@ class VaultStats:
     total_notes: int = 0
     total_wikilinks: int = 0
     total_tags: int = 0
-    unique_tags: set = None
-
-    def __post_init__(self):
-        if self.unique_tags is None:
-            self.unique_tags = set()
+    unique_tags: set[str] = field(default_factory=set)
 
     def __str__(self) -> str:
         return (
@@ -81,7 +78,7 @@ def parse_vault(
         try:
             yield parse_note(path, vault_root=vault_path)
         except Exception as e:
-            print(f"Warning: Failed to parse {path}: {e}")
+            log.warning(f"Failed to parse {path}: {e}")
             continue
 
 

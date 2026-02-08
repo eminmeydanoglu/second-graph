@@ -1,6 +1,7 @@
 """JSONL extraction reader."""
 
 import json
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
@@ -105,14 +106,12 @@ class ExtractionReader:
         """Get statistics about extractions."""
         all_extractions = self.read_all()
 
-        entity_types: dict[str, int] = {}
-        relation_types: dict[str, int] = {}
-
-        for ext in all_extractions:
-            for ent in ext.entities:
-                entity_types[ent.type] = entity_types.get(ent.type, 0) + 1
-            for rel in ext.relationships:
-                relation_types[rel.relation] = relation_types.get(rel.relation, 0) + 1
+        entity_types = Counter(
+            ent.type for ext in all_extractions for ent in ext.entities
+        )
+        relation_types = Counter(
+            rel.relation for ext in all_extractions for rel in ext.relationships
+        )
 
         return {
             "total_extractions": len(all_extractions),
@@ -120,6 +119,6 @@ class ExtractionReader:
             "without_path": sum(1 for e in all_extractions if not e.has_path),
             "total_entities": sum(len(e.entities) for e in all_extractions),
             "total_relationships": sum(len(e.relationships) for e in all_extractions),
-            "entity_types": entity_types,
-            "relation_types": relation_types,
+            "entity_types": dict(entity_types),
+            "relation_types": dict(relation_types),
         }

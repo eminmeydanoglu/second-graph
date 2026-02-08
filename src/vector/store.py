@@ -13,11 +13,6 @@ def serialize_vector(vec: list[float]) -> bytes:
     return struct.pack(f"{len(vec)}f", *vec)
 
 
-def deserialize_vector(data: bytes, dimensions: int) -> list[float]:
-    """Deserialize bytes back to a vector."""
-    return list(struct.unpack(f"{dimensions}f", data))
-
-
 class VectorStore:
     """SQLite-vec based vector storage."""
 

@@ -1,9 +1,9 @@
 """NetworkX graph builder for Obsidian vault."""
 
 import json
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import networkx as nx
 
@@ -140,22 +140,17 @@ class VaultGraph:
 
     def get_stats(self) -> GraphStats:
         """Get statistics about the graph."""
-        node_types: dict[str, int] = {}
-        edge_types: dict[str, int] = {}
-
-        for _, data in self.graph.nodes(data=True):
-            t = data.get("type", "Unknown")
-            node_types[t] = node_types.get(t, 0) + 1
-
-        for _, _, data in self.graph.edges(data=True):
-            t = data.get("type", "unknown")
-            edge_types[t] = edge_types.get(t, 0) + 1
-
+        node_types = Counter(
+            data.get("type", "Unknown") for _, data in self.graph.nodes(data=True)
+        )
+        edge_types = Counter(
+            data.get("type", "unknown") for _, _, data in self.graph.edges(data=True)
+        )
         return GraphStats(
             nodes=self.graph.number_of_nodes(),
             edges=self.graph.number_of_edges(),
-            node_types=node_types,
-            edge_types=edge_types,
+            node_types=dict(node_types),
+            edge_types=dict(edge_types),
         )
 
     def get_backlinks(self, note_path: str) -> list[str]:

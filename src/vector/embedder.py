@@ -1,9 +1,11 @@
 """Local embedding generation using sentence-transformers."""
 
+import logging
 from typing import Iterator
 
 from sentence_transformers import SentenceTransformer
 
+log = logging.getLogger(__name__)
 
 # Options:
 # - BAAI/bge-m3: Best quality, 2.2GB, needs 6GB+ VRAM
@@ -17,10 +19,10 @@ class Embedder:
     """Generate embeddings using local sentence-transformers model."""
 
     def __init__(self, model: str = DEFAULT_MODEL):
-        print(f"Loading embedding model: {model}")
+        log.info(f"Loading embedding model: {model}")
         self.model = SentenceTransformer(model)
         self.dimensions = self.model.get_sentence_embedding_dimension()
-        print(f"Model loaded. Dimensions: {self.dimensions}")
+        log.info(f"Model loaded. Dimensions: {self.dimensions}")
 
     def embed(self, text: str) -> list[float]:
         """Generate embedding for a single text.

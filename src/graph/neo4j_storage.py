@@ -57,20 +57,33 @@ class Neo4jStorage:
 
         return stats
 
+    def _sanitize_label(self, label: str) -> str:
+        """Sanitize label for Neo4j (no spaces, special chars)."""
+        import re
+
+        # Replace spaces and special chars with underscore
+        sanitized = re.sub(r"[^a-zA-Z0-9_]", "_", label)
+        # Ensure it starts with a letter
+        if sanitized and not sanitized[0].isalpha():
+            sanitized = "N_" + sanitized
+        return sanitized or "Unknown"
+
     def _import_node_batch(self, session, nodes: list[tuple[str, dict]]):
         """Import a batch of nodes."""
         # Group by type for efficient label creation
         by_type: dict[str, list] = {}
         for node_id, data in nodes:
-            node_type = data.get("type", "Unknown")
+            node_type = self._sanitize_label(data.get("type", "Unknown"))
             if node_type not in by_type:
                 by_type[node_type] = []
             by_type[node_type].append(
                 {
                     "id": node_id,
                     "title": data.get("title", data.get("name", node_id)),
+                    "name": data.get("name", data.get("title", "")),
                     "folder": data.get("folder", ""),
                     "placeholder": data.get("placeholder", False),
+                    "original_type": data.get("type", "Unknown"),
                 }
             )
 
@@ -79,8 +92,10 @@ class Neo4jStorage:
             UNWIND $nodes AS node
             MERGE (n:{node_type} {{id: node.id}})
             SET n.title = node.title,
+                n.name = node.name,
                 n.folder = node.folder,
-                n.placeholder = node.placeholder
+                n.placeholder = node.placeholder,
+                n.original_type = node.original_type
             """
             session.run(query, nodes=node_list)
 
@@ -89,7 +104,8 @@ class Neo4jStorage:
         # Group by type
         by_type: dict[str, list] = {}
         for source, target, data in edges:
-            edge_type = data.get("type", "RELATED_TO").upper().replace("-", "_")
+            raw_type = data.get("type", "RELATED_TO")
+            edge_type = self._sanitize_label(raw_type).upper()
             if edge_type not in by_type:
                 by_type[edge_type] = []
             by_type[edge_type].append(
