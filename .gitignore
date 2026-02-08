@@ -1,13 +1,5 @@
-# Generated files
-data/
-output/
-*.db
-
-# Agent/Prose files
-AGENTS.md
-*.prose
-lib/
-prompts/
+# Private data (databases, extractions, prompts)
+private/
 
 # Python
 __pycache__/
@@ -16,10 +8,12 @@ __pycache__/
 .venv/
 .eggs/
 *.egg-info/
+*.db
 
 # IDE
 .vscode/
 .idea/
+.ruff_cache/
 
 # OS
 .DS_Store
