@@ -3,6 +3,12 @@ data/
 output/
 *.db
 
+# Agent/Prose files
+AGENTS.md
+*.prose
+lib/
+prompts/
+
 # Python
 __pycache__/
 *.pyc
