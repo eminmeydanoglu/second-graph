@@ -53,18 +53,6 @@ class VaultGraph:
         )
         self._note_paths[note.title] = note.path
 
-        # Add folder relationship
-        if note.folder and note.folder != "root":
-            folder_id = f"folder:{note.folder}"
-            if not self.graph.has_node(folder_id):
-                self.graph.add_node(folder_id, type="Folder", name=note.folder)
-            self.graph.add_edge(
-                note_id,
-                folder_id,
-                type="in_folder",
-                confidence=1.0,
-            )
-
         # Add wikilinks
         for link in note.wikilinks:
             # Normalize link (could be "Folder/Note" or just "Note")
@@ -72,6 +60,10 @@ class VaultGraph:
 
             # Try to find existing note, otherwise create placeholder
             target_id = self._resolve_link(link_target) or f"note:{link_target}"
+
+            # Skip self-referential wikilinks
+            if target_id == note_id:
+                continue
 
             if not self.graph.has_node(target_id):
                 self.graph.add_node(
