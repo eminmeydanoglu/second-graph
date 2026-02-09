@@ -1,8 +1,9 @@
-"""Tests for graph resolution logic in VaultGraph."""
+"""Tests for VaultGraph resolution logic."""
 
 from pathlib import Path
 
 import pytest
+
 from src.graph.builder import VaultGraph
 from src.parser.markdown import ParsedNote
 
@@ -14,7 +15,7 @@ def graph():
 
 
 def create_note(
-    title: str, wikilinks: list[str] = None, path: str = None
+    title: str, wikilinks: list[str] | None = None, path: str | None = None
 ) -> ParsedNote:
     """Helper to create a ParsedNote with minimal required fields."""
     if path is None:
@@ -107,17 +108,6 @@ def test_self_reference_handling(graph):
     # 1. Note A links to itself
     note_a = create_note("Note A", wikilinks=["Note A"])
     graph.add_note(note_a)
-
-    # Verify no self-loop edge
-    # Note: add_note logic for self-reference depends on _resolve_link returning the current note's path
-    # OR the target_id logic handling it.
-
-    # Let's trace add_note for self-ref:
-    # note_id = "Note A.md"
-    # _note_paths["Note A"] = "Note A.md" (added before processing links)
-    # link_target = "Note A"
-    # target_id = _resolve_link("Note A") -> returns "Note A.md"
-    # if target_id == note_id: continue -> TRUE
 
     assert "Note A.md" in graph.graph
     assert not graph.graph.has_edge("Note A.md", "Note A.md")

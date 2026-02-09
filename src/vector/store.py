@@ -1,4 +1,4 @@
-"""SQLite-vec vector storage."""
+"""SQLite-vec vector storage for notes and entities."""
 
 import sqlite3
 import struct
@@ -14,9 +14,9 @@ def serialize_vector(vec: list[float]) -> bytes:
 
 
 class VectorStore:
-    """SQLite-vec based vector storage."""
+    """SQLite-vec based vector storage for notes and entities."""
 
-    def __init__(self, db_path: Path, dimensions: int = 384):
+    def __init__(self, db_path: Path | str, dimensions: int = 384):
         self.db_path = Path(db_path)
         self.dimensions = dimensions
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -29,7 +29,7 @@ class VectorStore:
         sqlite_vec.load(conn)
         conn.enable_load_extension(False)
 
-        # Create metadata table
+        # Notes table (existing)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS notes (
                 id INTEGER PRIMARY KEY,
@@ -40,9 +40,32 @@ class VectorStore:
             )
         """)
 
-        # Create virtual table for vectors
+        # Notes vector table (existing)
         conn.execute(f"""
             CREATE VIRTUAL TABLE IF NOT EXISTS note_vectors USING vec0(
+                embedding float[{self.dimensions}]
+            )
+        """)
+
+        # Entities table (NEW)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS entities (
+                id INTEGER PRIMARY KEY,
+                node_id TEXT UNIQUE NOT NULL,
+                node_type TEXT NOT NULL,
+                name TEXT NOT NULL,
+                summary TEXT
+            )
+        """)
+
+        # Create index on node_id
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_entities_node_id ON entities(node_id)
+        """)
+
+        # Entity vectors table (NEW)
+        conn.execute(f"""
+            CREATE VIRTUAL TABLE IF NOT EXISTS entity_vectors USING vec0(
                 embedding float[{self.dimensions}]
             )
         """)
@@ -57,6 +80,10 @@ class VectorStore:
         sqlite_vec.load(conn)
         conn.enable_load_extension(False)
         return conn
+
+    # =========================================================================
+    # NOTE OPERATIONS (existing)
+    # =========================================================================
 
     def add(
         self,
@@ -80,6 +107,9 @@ class VectorStore:
             (path, title, content, chunk_index),
         )
         row_id = cursor.lastrowid
+        if row_id is None:
+            conn.close()
+            raise RuntimeError("Failed to insert note")
 
         # Insert vector (rowid must match)
         cursor.execute(
@@ -140,7 +170,7 @@ class VectorStore:
         return results
 
     def count(self) -> int:
-        """Get the number of stored vectors."""
+        """Get the number of stored note vectors."""
         conn = self._get_conn()
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM notes")
@@ -149,9 +179,206 @@ class VectorStore:
         return count
 
     def clear(self):
-        """Clear all data."""
+        """Clear all note data."""
         conn = self._get_conn()
         conn.execute("DELETE FROM notes")
         conn.execute("DELETE FROM note_vectors")
+        conn.commit()
+        conn.close()
+
+    # =========================================================================
+    # ENTITY OPERATIONS (NEW)
+    # =========================================================================
+
+    def add_entity(
+        self,
+        node_id: str,
+        node_type: str,
+        name: str,
+        summary: str | None,
+        embedding: list[float],
+    ) -> int:
+        """Add or update an entity with its embedding.
+
+        Args:
+            node_id: Unique node identifier (e.g., "goal:build_ai")
+            node_type: Node type (Goal, Person, etc.)
+            name: Human-readable name
+            summary: Entity description
+            embedding: Vector embedding
+
+        Returns:
+            The row ID of the inserted entity
+        """
+        conn = self._get_conn()
+        cursor = conn.cursor()
+
+        # Check if entity exists
+        cursor.execute("SELECT id FROM entities WHERE node_id = ?", (node_id,))
+        existing = cursor.fetchone()
+
+        if existing:
+            # Update existing
+            row_id = existing[0]
+            cursor.execute(
+                "UPDATE entities SET node_type = ?, name = ?, summary = ? WHERE id = ?",
+                (node_type, name, summary, row_id),
+            )
+            # Update vector
+            cursor.execute(
+                "DELETE FROM entity_vectors WHERE rowid = ?",
+                (row_id,),
+            )
+            cursor.execute(
+                "INSERT INTO entity_vectors (rowid, embedding) VALUES (?, ?)",
+                (row_id, serialize_vector(embedding)),
+            )
+        else:
+            # Insert new
+            cursor.execute(
+                "INSERT INTO entities (node_id, node_type, name, summary) VALUES (?, ?, ?, ?)",
+                (node_id, node_type, name, summary),
+            )
+            row_id = cursor.lastrowid
+            if row_id is None:
+                conn.close()
+                raise RuntimeError("Failed to insert entity")
+            cursor.execute(
+                "INSERT INTO entity_vectors (rowid, embedding) VALUES (?, ?)",
+                (row_id, serialize_vector(embedding)),
+            )
+
+        conn.commit()
+        conn.close()
+        return row_id
+
+    def search_entities(
+        self,
+        query_embedding: list[float],
+        node_types: list[str] | None = None,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        """Search for similar entities using vector similarity.
+
+        Args:
+            query_embedding: The query vector
+            node_types: Optional list of node types to filter
+            limit: Maximum number of results
+
+        Returns:
+            List of entity dicts with scores
+        """
+        conn = self._get_conn()
+        cursor = conn.cursor()
+
+        # Build query with optional type filter
+        if node_types:
+            placeholders = ",".join("?" * len(node_types))
+            query = f"""
+                SELECT 
+                    e.node_id, e.node_type, e.name, e.summary, v.distance
+                FROM entity_vectors v
+                JOIN entities e ON e.id = v.rowid
+                WHERE v.embedding MATCH ? AND k = ?
+                  AND e.node_type IN ({placeholders})
+                ORDER BY v.distance
+            """
+            params: tuple = (serialize_vector(query_embedding), limit, *node_types)
+        else:
+            query = """
+                SELECT 
+                    e.node_id, e.node_type, e.name, e.summary, v.distance
+                FROM entity_vectors v
+                JOIN entities e ON e.id = v.rowid
+                WHERE v.embedding MATCH ? AND k = ?
+                ORDER BY v.distance
+            """
+            params = (serialize_vector(query_embedding), limit)
+
+        cursor.execute(query, params)
+
+        results = []
+        for row in cursor.fetchall():
+            results.append(
+                {
+                    "node_id": row[0],
+                    "node_type": row[1],
+                    "name": row[2],
+                    "summary": row[3],
+                    "distance": row[4],
+                    "score": 1 - row[4],  # Convert distance to similarity
+                }
+            )
+
+        conn.close()
+        return results
+
+    def get_entity(self, node_id: str) -> dict | None:
+        """Get an entity by node_id.
+
+        Args:
+            node_id: The entity's unique identifier
+
+        Returns:
+            Entity dict or None if not found
+        """
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT node_id, node_type, name, summary FROM entities WHERE node_id = ?",
+            (node_id,),
+        )
+        row = cursor.fetchone()
+        conn.close()
+
+        if not row:
+            return None
+
+        return {
+            "node_id": row[0],
+            "node_type": row[1],
+            "name": row[2],
+            "summary": row[3],
+        }
+
+    def delete_entity(self, node_id: str) -> bool:
+        """Delete an entity by node_id.
+
+        Args:
+            node_id: The entity's unique identifier
+
+        Returns:
+            True if deleted, False if not found
+        """
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM entities WHERE node_id = ?", (node_id,))
+        row = cursor.fetchone()
+
+        if row:
+            entity_id = row[0]
+            cursor.execute("DELETE FROM entities WHERE id = ?", (entity_id,))
+            cursor.execute("DELETE FROM entity_vectors WHERE rowid = ?", (entity_id,))
+            conn.commit()
+            conn.close()
+            return True
+
+        conn.close()
+        return False
+
+    def entity_count(self) -> int:
+        """Get the number of stored entities."""
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM entities")
+        count = cursor.fetchone()[0]
+        conn.close()
+        return count
+
+    def clear_entities(self):
+        """Clear all entity data."""
+        conn = self._get_conn()
+        conn.execute("DELETE FROM entities")
+        conn.execute("DELETE FROM entity_vectors")
         conn.commit()
         conn.close()

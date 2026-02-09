@@ -292,5 +292,64 @@ def extraction_stats(extractions_path: Path):
         click.echo(f"  {rtype}: {count}")
 
 
+@cli.command("mcp-server")
+@click.option(
+    "--neo4j-uri", default="bolt://localhost:7687", help="Neo4j connection URI"
+)
+@click.option("--neo4j-user", default="neo4j", help="Neo4j username")
+@click.option("--neo4j-password", default="obsidian", help="Neo4j password")
+@click.option(
+    "--vector-db",
+    type=click.Path(path_type=Path),
+    default="data/vectors.db",
+    help="Path to vector database",
+)
+@click.option(
+    "--transport",
+    type=click.Choice(["stdio", "sse"]),
+    default="stdio",
+    help="MCP transport type",
+)
+def mcp_server(
+    neo4j_uri: str,
+    neo4j_user: str,
+    neo4j_password: str,
+    vector_db: Path,
+    transport: str,
+):
+    """Run the Graph Manipulator MCP server.
+
+    This server exposes knowledge graph CRUD operations as MCP tools.
+    Used by Graph Agent (subagent) for runtime memory manipulation.
+    """
+    from .mcp import init_server, mcp
+
+    click.echo(f"Connecting to Neo4j: {neo4j_uri}")
+    click.echo(f"Vector DB: {vector_db}")
+
+    init_server(
+        neo4j_uri=neo4j_uri,
+        neo4j_user=neo4j_user,
+        neo4j_password=neo4j_password,
+        vector_db=str(vector_db),
+    )
+
+    click.echo(f"Starting MCP server ({transport} transport)...")
+    click.echo(
+        "Available tools: add_node, get_node, find_node, update_node, delete_node,"
+    )
+    click.echo("                 add_edge, get_edge, delete_edge, invalidate_edge,")
+    click.echo(
+        "                 get_neighbors, find_path, search_entities, get_schema, get_stats"
+    )
+
+    import asyncio
+
+    if transport == "stdio":
+        asyncio.run(mcp.run_stdio_async())
+    else:
+        asyncio.run(mcp.run_sse_async())
+
+
 if __name__ == "__main__":
     cli()
