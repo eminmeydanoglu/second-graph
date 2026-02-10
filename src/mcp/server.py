@@ -21,6 +21,7 @@ from ..graph.schema import (
 from ..graph.sync import NoteSynchronizer
 from ..vector.store import VectorStore
 from ..vector.embedder import Embedder
+from ..extraction.tracker import NoteTracker
 
 mcp = FastMCP(
     "Graph Manipulator",
@@ -40,6 +41,7 @@ storage: Neo4jStorage | None = None
 vectors: VectorStore | None = None
 embedder: Embedder | None = None
 synchronizer: NoteSynchronizer | None = None
+tracker: NoteTracker | None = None
 
 
 def init_server(
@@ -49,11 +51,12 @@ def init_server(
     vector_db: str = "data/vectors.db",
 ):
     """Initialize server with database connections."""
-    global storage, vectors, embedder, synchronizer
+    global storage, vectors, embedder, synchronizer, tracker
     storage = Neo4jStorage(uri=neo4j_uri, user=neo4j_user, password=neo4j_password)
     vectors = VectorStore(vector_db)
     embedder = Embedder()
     synchronizer = NoteSynchronizer(storage, vectors, embedder)
+    tracker = NoteTracker(vectors)
 
 
 def _require_storage() -> Neo4jStorage:
@@ -487,9 +490,79 @@ def add_agent_edge(
     return result
 
 
+def _require_tracker() -> NoteTracker:
+    """Get tracker or raise error."""
+    if tracker is None:
+        raise RuntimeError("Server not initialized. Call init_server() first.")
+    return tracker
+
+
+@mcp.tool()
+def check_note_status(path: str) -> dict:
+    """Check if a note needs extraction.
+
+    Reads the file, computes SHA256 hash, compares with stored hash
+    from last extraction.
+
+    Args:
+        path: Absolute path to the markdown file
+
+    Returns:
+        - status="new": {status, content} — never extracted before
+        - status="changed": {status, diff, content, last_extracted_at} — content changed
+        - status="unchanged": {status, last_extracted_at} — skip, no changes
+        - status="error": {status, error} — file not found or read error
+    """
+    t = _require_tracker()
+    return t.check_note_status(path)
+
+
+@mcp.tool()
+def mark_extracted(path: str) -> dict:
+    """Mark a note as successfully extracted.
+
+    Call this after the graph agent finishes extracting a note.
+    Updates the content hash, stores content snapshot for future diffs,
+    and records the diff in the audit trail.
+
+    Args:
+        path: Absolute path to the markdown file
+
+    Returns:
+        Dict with success, content_hash, extracted_at
+    """
+    t = _require_tracker()
+    return t.mark_extracted(path)
+
+
+@mcp.tool()
+def list_pending_notes(vault_path: str) -> dict:
+    """List notes in vault that need extraction.
+
+    Scans all markdown files in the vault, computes hashes,
+    and compares with stored extraction state.
+
+    Args:
+        vault_path: Absolute path to the Obsidian vault root
+
+    Returns:
+        Dict with pending list [{path, status}], pending_count, unchanged_count
+    """
+    t = _require_tracker()
+    return t.list_pending_notes(vault_path)
+
+
 def main():
     """Run the MCP server (stdio transport)."""
     import asyncio
+    import os
+
+    init_server(
+        neo4j_uri=os.environ.get("NEO4J_URI", "bolt://localhost:7687"),
+        neo4j_user=os.environ.get("NEO4J_USER", "neo4j"),
+        neo4j_password=os.environ.get("NEO4J_PASSWORD", "obsidian"),
+        vector_db=os.environ.get("VECTOR_DB", "data/vectors.db"),
+    )
 
     asyncio.run(mcp.run_stdio_async())
 
