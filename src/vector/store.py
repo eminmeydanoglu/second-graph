@@ -70,6 +70,36 @@ class VectorStore:
             )
         """)
 
+        # Extraction tracking: stores content snapshot at extraction time
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS note_extractions (
+                id INTEGER PRIMARY KEY,
+                path TEXT UNIQUE NOT NULL,
+                content_hash TEXT NOT NULL,
+                extracted_at TEXT NOT NULL,
+                content TEXT NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_extractions_path ON note_extractions(path)
+        """)
+
+        # Extraction diffs: audit trail of what changed between extractions
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS extraction_diffs (
+                id INTEGER PRIMARY KEY,
+                path TEXT NOT NULL,
+                extracted_at TEXT NOT NULL,
+                old_hash TEXT,
+                new_hash TEXT NOT NULL,
+                diff TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'new'
+            )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_diffs_path ON extraction_diffs(path)
+        """)
+
         conn.commit()
         conn.close()
 
@@ -380,5 +410,114 @@ class VectorStore:
         conn = self._get_conn()
         conn.execute("DELETE FROM entities")
         conn.execute("DELETE FROM entity_vectors")
+        conn.commit()
+        conn.close()
+
+    # =========================================================================
+    # EXTRACTION TRACKING OPERATIONS
+    # =========================================================================
+
+    def get_extraction_status(self, path: str) -> dict | None:
+        """Get stored extraction status for a note path.
+
+        Returns:
+            Dict with content_hash, extracted_at, or None if never extracted.
+        """
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT content_hash, extracted_at FROM note_extractions WHERE path = ?",
+            (path,),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            return None
+        return {"content_hash": row[0], "extracted_at": row[1]}
+
+    def get_note_snapshot(self, path: str) -> str | None:
+        """Get the stored content snapshot from last extraction."""
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT content FROM note_extractions WHERE path = ?",
+            (path,),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row else None
+
+    def upsert_extraction(
+        self, path: str, content_hash: str, extracted_at: str, content: str
+    ) -> None:
+        """Insert or update extraction record for a note."""
+        conn = self._get_conn()
+        conn.execute(
+            """
+            INSERT INTO note_extractions (path, content_hash, extracted_at, content)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(path) DO UPDATE SET
+                content_hash = excluded.content_hash,
+                extracted_at = excluded.extracted_at,
+                content = excluded.content
+            """,
+            (path, content_hash, extracted_at, content),
+        )
+        conn.commit()
+        conn.close()
+
+    def store_extraction_diff(
+        self,
+        path: str,
+        extracted_at: str,
+        old_hash: str | None,
+        new_hash: str,
+        diff: str,
+        status: str,
+    ) -> None:
+        """Store an extraction diff record for audit trail."""
+        conn = self._get_conn()
+        conn.execute(
+            """
+            INSERT INTO extraction_diffs (path, extracted_at, old_hash, new_hash, diff, status)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (path, extracted_at, old_hash, new_hash, diff, status),
+        )
+        conn.commit()
+        conn.close()
+
+    def get_extraction_diffs(self, path: str, limit: int = 10) -> list[dict]:
+        """Get extraction diff history for a note."""
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT extracted_at, old_hash, new_hash, diff, status
+            FROM extraction_diffs
+            WHERE path = ?
+            ORDER BY extracted_at DESC
+            LIMIT ?
+            """,
+            (path, limit),
+        )
+        results = [
+            {
+                "extracted_at": row[0],
+                "old_hash": row[1],
+                "new_hash": row[2],
+                "diff": row[3],
+                "status": row[4],
+            }
+            for row in cursor.fetchall()
+        ]
+        conn.close()
+        return results
+
+    def clear_extractions(self):
+        """Clear all extraction tracking data."""
+        conn = self._get_conn()
+        conn.execute("DELETE FROM note_extractions")
+        conn.execute("DELETE FROM extraction_diffs")
         conn.commit()
         conn.close()

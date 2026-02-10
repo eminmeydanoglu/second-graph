@@ -2,6 +2,7 @@
 
 from .reader import ExtractionReader, ExtractedNote, Entity, Relationship
 from .merger import ExtractionMerger
+from .tracker import NoteTracker
 
 __all__ = [
     "ExtractionReader",
@@ -9,4 +10,5 @@ __all__ = [
     "Entity",
     "Relationship",
     "ExtractionMerger",
+    "NoteTracker",
 ]
