@@ -10,12 +10,15 @@ from ..graph.neo4j_storage import Neo4jStorage
 from ..graph.schema import (
     NodeType,
     EdgeType,
+    SourceType,
     validate_node_type,
     validate_edge,
     generate_node_id,
+    generate_source_id,
     get_node_types,
     get_edge_types,
 )
+from ..graph.sync import NoteSynchronizer
 from ..vector.store import VectorStore
 from ..vector.embedder import Embedder
 
@@ -33,10 +36,10 @@ Use update_node/delete_node for modifications.
 """,
 )
 
-# Global instances - initialized by init_server()
 storage: Neo4jStorage | None = None
 vectors: VectorStore | None = None
 embedder: Embedder | None = None
+synchronizer: NoteSynchronizer | None = None
 
 
 def init_server(
@@ -46,10 +49,11 @@ def init_server(
     vector_db: str = "data/vectors.db",
 ):
     """Initialize server with database connections."""
-    global storage, vectors, embedder
+    global storage, vectors, embedder, synchronizer
     storage = Neo4jStorage(uri=neo4j_uri, user=neo4j_user, password=neo4j_password)
     vectors = VectorStore(vector_db)
     embedder = Embedder()
+    synchronizer = NoteSynchronizer(storage, vectors, embedder)
 
 
 def _require_storage() -> Neo4jStorage:
@@ -71,11 +75,6 @@ def _require_embedder() -> Embedder:
     if embedder is None:
         raise RuntimeError("Server not initialized. Call init_server() first.")
     return embedder
-
-
-# =============================================================================
-# NODE TOOLS
-# =============================================================================
 
 
 @mcp.tool()
@@ -107,14 +106,12 @@ def add_node(
     if summary:
         props["summary"] = summary
 
-    # Add to Neo4j
     db = _require_storage()
     result = db.add_node(node_type, node_id, name, props)
 
     if not result:
         return {"success": False, "error": "Failed to create node"}
 
-    # Add embedding if summary provided
     if summary:
         emb = _require_embedder()
         vecs = _require_vectors()
@@ -178,7 +175,6 @@ def update_node(node_id: str, properties: dict) -> dict:
     if not result:
         return {"success": False, "error": f"Node not found: {node_id}"}
 
-    # Update embedding if summary changed
     if "summary" in properties:
         node = db.get_node(node_id)
         if node:
@@ -206,11 +202,9 @@ def delete_node(node_id: str) -> dict:
     db = _require_storage()
     result = db.delete_node(node_id)
 
-    # Also remove from vector store
     vecs = _require_vectors()
     vecs.delete_entity(node_id)
 
-    # Propagate failure if node wasn't found/deleted
     success = result.get("deleted", False)
     return {"success": success, **result}
 
@@ -228,22 +222,14 @@ def merge_nodes(keep_id: str, merge_id: str) -> dict:
     """
     db = _require_storage()
 
-    # Use simple merge (doesn't require APOC)
     result = db.merge_nodes_simple(keep_id, merge_id)
 
-    # Only remove from vector store if merge succeeded
     if result.get("merged", False):
         vecs = _require_vectors()
         vecs.delete_entity(merge_id)
 
-    # Propagate success/failure from storage result
     success = result.get("merged", False)
     return {"success": success, **result}
-
-
-# =============================================================================
-# EDGE TOOLS
-# =============================================================================
 
 
 @mcp.tool()
@@ -264,7 +250,6 @@ def add_edge(
     Returns:
         Dict with edge details
     """
-    # Validate edge (get source and target types for validation)
     db = _require_storage()
 
     source_node = db.get_node(from_id)
@@ -282,7 +267,6 @@ def add_edge(
     if not validation.valid:
         return {"success": False, "errors": validation.errors}
     if validation.warnings:
-        # Log warnings but continue
         pass
 
     result = db.add_edge(from_id, to_id, relation, properties)
@@ -339,11 +323,6 @@ def invalidate_edge(edge_id: str, reason: str | None = None) -> dict:
     if not result:
         return {"success": False, "error": f"Edge not found: {edge_id}"}
     return {"success": True, "edge": result}
-
-
-# =============================================================================
-# QUERY TOOLS
-# =============================================================================
 
 
 @mcp.tool()
@@ -438,9 +417,74 @@ def get_stats() -> dict:
     return {"success": True, **stats}
 
 
-# =============================================================================
-# ENTRY POINT
-# =============================================================================
+def _require_synchronizer() -> NoteSynchronizer:
+    """Get synchronizer or raise error."""
+    if synchronizer is None:
+        raise RuntimeError("Server not initialized. Call init_server() first.")
+    return synchronizer
+
+
+@mcp.tool()
+def sync_note(path: str) -> dict:
+    """Sync a markdown note file to the knowledge graph.
+
+    Uses source-aware reconciliation: only modifies edges that came from
+    this file (source="file:{path}"), preserving agent/extraction edges.
+
+    Args:
+        path: Absolute path to the markdown file
+
+    Returns:
+        Dict with sync results (node_id, action, edges changed, source)
+    """
+    sync = _require_synchronizer()
+    return sync.sync_note(path)
+
+
+@mcp.tool()
+def add_agent_edge(
+    from_id: str,
+    to_id: str,
+    relation: str,
+    properties: dict | None = None,
+) -> dict:
+    """Create a relationship with agent provenance.
+
+    Use this when the agent (not file parsing) discovers a relationship.
+    These edges are preserved when files are re-synced.
+
+    Args:
+        from_id: Source node ID
+        to_id: Target node ID
+        relation: Relationship type
+        properties: Optional additional properties
+
+    Returns:
+        Dict with edge details
+    """
+    db = _require_storage()
+
+    source_node = db.get_node(from_id)
+    target_node = db.get_node(to_id)
+
+    if not source_node:
+        return {"success": False, "error": f"Source node not found: {from_id}"}
+    if not target_node:
+        return {"success": False, "error": f"Target node not found: {to_id}"}
+
+    source_type = source_node["node"].get("_labels", ["Unknown"])[0]
+    target_type = target_node["node"].get("_labels", ["Unknown"])[0]
+
+    validation = validate_edge(source_type, target_type, relation)
+    if not validation.valid:
+        return {"success": False, "errors": validation.errors}
+
+    source_id = generate_source_id(SourceType.AGENT)
+
+    result = db.add_edge(from_id, to_id, relation, properties, source=source_id)
+    if result.get("success"):
+        result["source"] = source_id
+    return result
 
 
 def main():
