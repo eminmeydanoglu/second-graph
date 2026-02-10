@@ -3,6 +3,7 @@
 import pytest
 
 from src.graph.neo4j_storage import Neo4jStorage
+from src.graph.schema import SourceType, generate_source_id
 
 
 class TestNeo4jCRUD:
@@ -246,3 +247,139 @@ class TestNeo4jEdgeCases:
 
         assert result["merged"] is False
         assert "error" in result
+
+
+class TestSourceAwareEdges:
+    """Tests for source-aware edge operations."""
+
+    @pytest.fixture
+    def storage(self):
+        """Neo4j storage with cleanup."""
+        try:
+            s = Neo4jStorage(
+                uri="bolt://localhost:7687", user="neo4j", password="obsidian"
+            )
+            s.get_stats()
+            s.clear()
+            yield s
+            s.clear()
+            s.close()
+        except Exception as exc:
+            pytest.skip(f"Neo4j not available: {exc}")
+
+    def test_add_edge_with_source(self, storage):
+        """Test adding an edge with source provenance."""
+        storage.add_node("Note", "note:source_a", "Source A", {})
+        storage.add_node("Note", "note:source_b", "Source B", {})
+
+        source_id = generate_source_id(SourceType.FILE, "/vault/test.md")
+        result = storage.add_edge(
+            "note:source_a",
+            "note:source_b",
+            "WIKILINK",
+            source=source_id,
+        )
+
+        assert result["success"] is True
+
+        # Verify source is stored
+        edge = storage.get_edge(result["edge_id"])
+        assert edge is not None
+        assert edge["edge"]["source"] == source_id
+
+    def test_get_edges_by_source(self, storage):
+        """Test filtering edges by source."""
+        storage.add_node("Note", "note:filter_a", "Filter A", {})
+        storage.add_node("Note", "note:filter_b", "Filter B", {})
+        storage.add_node("Note", "note:filter_c", "Filter C", {})
+
+        file_source = generate_source_id(SourceType.FILE, "/vault/test.md")
+        agent_source = generate_source_id(SourceType.AGENT)
+
+        # Add edges with different sources
+        storage.add_edge(
+            "note:filter_a", "note:filter_b", "WIKILINK", source=file_source
+        )
+        storage.add_edge(
+            "note:filter_a", "note:filter_c", "RELATED_TO", source=agent_source
+        )
+
+        # Get only file-sourced edges
+        file_edges = storage.get_edges_by_source("note:filter_a", file_source)
+        assert len(file_edges) == 1
+        assert file_edges[0]["target_name"] == "Filter B"
+
+        # Get only agent-sourced edges
+        agent_edges = storage.get_edges_by_source("note:filter_a", agent_source)
+        assert len(agent_edges) == 1
+        assert agent_edges[0]["target_name"] == "Filter C"
+
+    def test_get_edges_by_source_direction(self, storage):
+        """Test edge direction filtering with source."""
+        storage.add_node("Note", "note:dir_a", "Dir A", {})
+        storage.add_node("Note", "note:dir_b", "Dir B", {})
+
+        source = generate_source_id(SourceType.FILE, "/vault/dir.md")
+        storage.add_edge("note:dir_a", "note:dir_b", "WIKILINK", source=source)
+
+        # Outgoing from A
+        out_edges = storage.get_edges_by_source("note:dir_a", source, direction="out")
+        assert len(out_edges) == 1
+
+        # Incoming to B
+        in_edges = storage.get_edges_by_source("note:dir_b", source, direction="in")
+        assert len(in_edges) == 1
+
+        # No outgoing from B
+        out_edges_b = storage.get_edges_by_source("note:dir_b", source, direction="out")
+        assert len(out_edges_b) == 0
+
+    def test_delete_edges_by_source(self, storage):
+        """Test deleting edges by source."""
+        storage.add_node("Note", "note:del_a", "Del A", {})
+        storage.add_node("Note", "note:del_b", "Del B", {})
+        storage.add_node("Note", "note:del_c", "Del C", {})
+
+        file_source = generate_source_id(SourceType.FILE, "/vault/del.md")
+        agent_source = generate_source_id(SourceType.AGENT)
+
+        storage.add_edge("note:del_a", "note:del_b", "WIKILINK", source=file_source)
+        storage.add_edge("note:del_a", "note:del_c", "RELATED_TO", source=agent_source)
+
+        # Delete only file-sourced edges
+        deleted = storage.delete_edges_by_source("note:del_a", file_source)
+        assert deleted == 1
+
+        # Verify file edge gone
+        file_edges = storage.get_edges_by_source("note:del_a", file_source)
+        assert len(file_edges) == 0
+
+        # Verify agent edge still exists
+        agent_edges = storage.get_edges_by_source("note:del_a", agent_source)
+        assert len(agent_edges) == 1
+
+    def test_delete_edges_by_source_returns_count(self, storage):
+        """Test delete returns accurate count."""
+        storage.add_node("Note", "note:count_a", "Count A", {})
+        storage.add_node("Note", "note:count_b", "Count B", {})
+        storage.add_node("Note", "note:count_c", "Count C", {})
+
+        source = generate_source_id(SourceType.FILE, "/vault/count.md")
+        storage.add_edge("note:count_a", "note:count_b", "WIKILINK", source=source)
+        storage.add_edge("note:count_a", "note:count_c", "WIKILINK", source=source)
+
+        deleted = storage.delete_edges_by_source("note:count_a", source)
+        assert deleted == 2
+
+    def test_edge_without_source(self, storage):
+        """Test edges without source are not returned by source filter."""
+        storage.add_node("Note", "note:nosrc_a", "NoSrc A", {})
+        storage.add_node("Note", "note:nosrc_b", "NoSrc B", {})
+
+        # Add edge without source
+        storage.add_edge("note:nosrc_a", "note:nosrc_b", "WIKILINK")
+
+        # Should not be found when filtering by source
+        source = generate_source_id(SourceType.FILE, "/vault/nosrc.md")
+        edges = storage.get_edges_by_source("note:nosrc_a", source)
+        assert len(edges) == 0

@@ -5,7 +5,9 @@ import pytest
 from src.graph.schema import (
     NodeType,
     EdgeType,
+    SourceType,
     generate_node_id,
+    generate_source_id,
     validate_node_type,
     validate_edge_type,
     validate_edge,
@@ -114,3 +116,43 @@ class TestSchema:
         assert "MOTIVATES" in types
         assert "RELATED_TO" in types
         assert len(types) == len(EdgeType)
+
+
+class TestSourceType:
+    """Tests for SourceType enum and generate_source_id."""
+
+    def test_source_type_values(self):
+        """Test SourceType enum has expected values."""
+        assert SourceType.FILE.value == "file"
+        assert SourceType.AGENT.value == "agent"
+        assert SourceType.EXTRACTION.value == "extraction"
+        assert SourceType.SYSTEM.value == "system"
+
+    def test_generate_source_id_file(self):
+        """Test file source ID generation."""
+        source_id = generate_source_id(SourceType.FILE, "/vault/Projects/AI.md")
+        assert source_id == "file:/vault/Projects/AI.md"
+
+    def test_generate_source_id_agent(self):
+        """Test agent source ID generation (no identifier)."""
+        source_id = generate_source_id(SourceType.AGENT)
+        assert source_id == "agent"
+
+    def test_generate_source_id_extraction(self):
+        """Test extraction source ID generation."""
+        source_id = generate_source_id(SourceType.EXTRACTION, "v1:/vault/AI.md")
+        assert source_id == "extraction:v1:/vault/AI.md"
+
+    def test_generate_source_id_system(self):
+        """Test system source ID generation."""
+        source_id = generate_source_id(SourceType.SYSTEM, "init")
+        assert source_id == "system:init"
+
+    def test_source_id_format_consistency(self):
+        """Test that source IDs follow expected format."""
+        # FILE, EXTRACTION, SYSTEM use {type}:{identifier}
+        assert generate_source_id(SourceType.FILE, "test") == "file:test"
+        assert generate_source_id(SourceType.EXTRACTION, "test") == "extraction:test"
+        assert generate_source_id(SourceType.SYSTEM, "test") == "system:test"
+        # AGENT is just "agent" (no identifier)
+        assert generate_source_id(SourceType.AGENT) == "agent"

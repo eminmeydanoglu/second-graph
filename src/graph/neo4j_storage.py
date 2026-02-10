@@ -32,10 +32,6 @@ class Neo4jStorage:
         with self.driver.session() as session:
             session.run("MATCH (n) DETACH DELETE n")
 
-    # =========================================================================
-    # INITIAL IMPORT (from VaultGraph)
-    # =========================================================================
-
     def import_vault_graph(
         self, graph: VaultGraph, batch_size: int = 500
     ) -> dict[str, int]:
@@ -47,21 +43,18 @@ class Neo4jStorage:
         stats = {"nodes": 0, "relationships": 0}
 
         with self.driver.session() as session:
-            # Import nodes in batches
             nodes = list(graph.graph.nodes(data=True))
             for i in range(0, len(nodes), batch_size):
                 batch = nodes[i : i + batch_size]
                 self._import_node_batch(session, batch)
                 stats["nodes"] += len(batch)
 
-            # Import edges in batches
             edges = list(graph.graph.edges(data=True))
             for i in range(0, len(edges), batch_size):
                 batch = edges[i : i + batch_size]
                 self._import_edge_batch(session, batch)
                 stats["relationships"] += len(batch)
 
-        # Create indexes for performance
         self._create_indexes()
 
         return stats
@@ -70,16 +63,13 @@ class Neo4jStorage:
         """Sanitize label for Neo4j (no spaces, special chars)."""
         import re
 
-        # Replace spaces and special chars with underscore
         sanitized = re.sub(r"[^a-zA-Z0-9_]", "_", label)
-        # Ensure it starts with a letter
         if sanitized and not sanitized[0].isalpha():
             sanitized = "N_" + sanitized
         return sanitized or "Unknown"
 
     def _import_node_batch(self, session, nodes: list[tuple[str, dict]]):
         """Import a batch of nodes."""
-        # Group by type for efficient label creation
         by_type: dict[str, list] = {}
         for node_id, data in nodes:
             node_type = self._sanitize_label(data.get("type", "Unknown"))
@@ -110,7 +100,6 @@ class Neo4jStorage:
 
     def _import_edge_batch(self, session, edges: list[tuple[str, str, dict]]):
         """Import a batch of edges."""
-        # Group by type
         by_type: dict[str, list] = {}
         for source, target, data in edges:
             raw_type = data.get("type", "RELATED_TO")
@@ -138,7 +127,6 @@ class Neo4jStorage:
     def _create_indexes(self):
         """Create indexes for common queries."""
         with self.driver.session() as session:
-            # Index on id for all node types
             for label in [
                 "Note",
                 "Tag",
@@ -164,10 +152,6 @@ class Neo4jStorage:
                     )
                 except Exception:
                     pass  # Index might already exist
-
-    # =========================================================================
-    # NODE OPERATIONS (CRUD)
-    # =========================================================================
 
     def add_node(
         self, node_type: str, node_id: str, name: str, properties: dict | None = None
@@ -237,7 +221,6 @@ class Neo4jStorage:
             node_dict = dict(record["n"])
             node_dict["_labels"] = record["labels"]
 
-            # Filter out null connections
             connections = [
                 c for c in record["connections"] if c["neighbor_id"] is not None
             ]
@@ -323,7 +306,6 @@ class Neo4jStorage:
             Dict with deletion status and edge count
         """
         with self.driver.session() as session:
-            # Get edge count first
             count_result = session.run(
                 """
                 MATCH (n {id: $id})-[r]-()
@@ -334,7 +316,6 @@ class Neo4jStorage:
             count_record = count_result.single()
             edge_count = count_record["edge_count"] if count_record else 0
 
-            # Delete node and relationships
             delete_result = session.run(
                 """
                 MATCH (n {id: $id})
@@ -358,7 +339,6 @@ class Neo4jStorage:
             Dict with merge status and transferred edge count
         """
         with self.driver.session() as session:
-            # Transfer incoming edges
             session.run(
                 """
                 MATCH (keep {id: $keep_id})
@@ -373,7 +353,6 @@ class Neo4jStorage:
                 merge_id=merge_id,
             )
 
-            # Transfer outgoing edges
             session.run(
                 """
                 MATCH (keep {id: $keep_id})
@@ -388,7 +367,6 @@ class Neo4jStorage:
                 merge_id=merge_id,
             )
 
-            # Count and delete merge node
             count_result = session.run(
                 """
                 MATCH (n {id: $id})-[r]-()
@@ -414,7 +392,6 @@ class Neo4jStorage:
         For use when APOC is not available.
         """
         with self.driver.session() as session:
-            # Check if both nodes exist
             check_result = session.run(
                 """
                 OPTIONAL MATCH (keep {id: $keep_id})
@@ -438,7 +415,6 @@ class Neo4jStorage:
                     "edges_transferred": 0,
                 }
 
-            # Get edges to transfer
             result = session.run(
                 """
                 MATCH (merge {id: $merge_id})
@@ -457,7 +433,6 @@ class Neo4jStorage:
             incoming = [e for e in record["incoming"] if e["source"]]
             outgoing = [e for e in record["outgoing"] if e["target"]]
 
-            # Create new edges to keep node
             for edge in incoming:
                 session.run(
                     f"""
@@ -480,7 +455,6 @@ class Neo4jStorage:
                     target_id=edge["target"],
                 )
 
-            # Delete merge node
             session.run(
                 """
                 MATCH (n {id: $id})
@@ -491,16 +465,13 @@ class Neo4jStorage:
 
             return {"merged": True, "edges_transferred": len(incoming) + len(outgoing)}
 
-    # =========================================================================
-    # EDGE OPERATIONS (CRUD)
-    # =========================================================================
-
     def add_edge(
         self,
         from_id: str,
         to_id: str,
         relation: str,
         properties: dict | None = None,
+        source: str | None = None,
     ) -> dict:
         """Create an edge between two nodes.
 
@@ -509,6 +480,7 @@ class Neo4jStorage:
             to_id: Target node ID
             relation: Relationship type (CONTRIBUTES_TO, MOTIVATES, etc.)
             properties: Additional edge properties (confidence, fact, etc.)
+            source: Provenance source ID (e.g., "file:/path/to/note.md")
 
         Returns:
             Dict with success status and edge details
@@ -517,6 +489,8 @@ class Neo4jStorage:
         edge_id = f"edge:{uuid4().hex[:12]}"
         props["id"] = edge_id
         props["created_at"] = datetime.now().isoformat()
+        if source:
+            props["source"] = source
 
         sanitized_rel = self._sanitize_label(relation).upper()
 
@@ -670,9 +644,88 @@ class Neo4jStorage:
             record = result.single()
             return dict(record["r"]) if record else None
 
-    # =========================================================================
-    # QUERY OPERATIONS
-    # =========================================================================
+    def get_edges_by_source(
+        self,
+        node_id: str,
+        source: str,
+        direction: str = "out",
+    ) -> list[dict]:
+        """Get edges from a node filtered by provenance source.
+
+        Args:
+            node_id: The node's unique identifier
+            source: Source ID to filter by (e.g., "file:/path/to/note.md")
+            direction: "in", "out", or "both"
+
+        Returns:
+            List of edges with their properties and target info
+        """
+        if direction == "out":
+            pattern = "(n)-[r]->(target)"
+        elif direction == "in":
+            pattern = "(n)<-[r]-(target)"
+        else:
+            pattern = "(n)-[r]-(target)"
+
+        with self.driver.session() as session:
+            result = session.run(
+                f"""
+                MATCH (n {{id: $node_id}})
+                MATCH {pattern}
+                WHERE r.source = $source
+                RETURN r, target.id as target_id, target.name as target_name,
+                       type(r) as relation
+                """,
+                node_id=node_id,
+                source=source,
+            )
+            return [
+                {
+                    "edge": dict(r["r"]),
+                    "target_id": r["target_id"],
+                    "target_name": r["target_name"],
+                    "relation": r["relation"],
+                }
+                for r in result
+            ]
+
+    def delete_edges_by_source(
+        self,
+        node_id: str,
+        source: str,
+        direction: str = "out",
+    ) -> int:
+        """Delete all edges from a node with a specific source.
+
+        Args:
+            node_id: The node's unique identifier
+            source: Source ID to filter by (e.g., "file:/path/to/note.md")
+            direction: "in", "out", or "both"
+
+        Returns:
+            Number of edges deleted
+        """
+        if direction == "out":
+            pattern = "(n)-[r]->()"
+        elif direction == "in":
+            pattern = "(n)<-[r]-()"
+        else:
+            pattern = "(n)-[r]-()"
+
+        with self.driver.session() as session:
+            result = session.run(
+                f"""
+                MATCH (n {{id: $node_id}})
+                MATCH {pattern}
+                WHERE r.source = $source
+                DELETE r
+                RETURN count(*) as deleted
+                """,
+                node_id=node_id,
+                source=source,
+            )
+            record = result.single()
+            return record["deleted"] if record else 0
 
     def get_neighbors(
         self,
@@ -787,7 +840,6 @@ class Neo4jStorage:
             )
             record = result.single()
             if not record:
-                # Fallback without APOC
                 return self._get_subgraph_simple(node_id, depth, max_nodes)
 
             nodes = [
@@ -809,7 +861,6 @@ class Neo4jStorage:
     ) -> dict:
         """Get subgraph without APOC."""
         with self.driver.session() as session:
-            # First get all connected nodes
             nodes_result = session.run(
                 f"""
                 MATCH path = (center {{id: $id}})-[*0..{depth}]-(connected)
@@ -833,7 +884,6 @@ class Neo4jStorage:
             if not node_ids:
                 return {"nodes": [], "edges": []}
 
-            # Then get edges between those nodes
             edges_result = session.run(
                 """
                 MATCH (a)-[r]-(b)
@@ -854,10 +904,6 @@ class Neo4jStorage:
                 "edges": [e for e in edges if e["from_id"]],
             }
 
-    # =========================================================================
-    # STATISTICS
-    # =========================================================================
-
     def get_stats(self) -> dict[str, Any]:
         """Get database statistics."""
         with self.driver.session() as session:
@@ -868,7 +914,6 @@ class Neo4jStorage:
                 "MATCH ()-[r]->() RETURN count(r) as count"
             ).single()["count"]
 
-            # Count by label
             labels = session.run("CALL db.labels() YIELD label RETURN label").data()
             label_counts = {}
             for row in labels:

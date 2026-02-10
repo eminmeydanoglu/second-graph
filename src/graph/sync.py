@@ -6,7 +6,7 @@ from typing import Any
 
 from ..parser.markdown import parse_note, ParsedNote
 from .neo4j_storage import Neo4jStorage
-from .schema import NodeType, EdgeType, generate_node_id
+from .schema import NodeType, EdgeType, generate_node_id, SourceType, generate_source_id
 from ..vector.store import VectorStore
 from ..vector.embedder import Embedder
 
@@ -38,6 +38,9 @@ class NoteSynchronizer:
     def sync_note(self, file_path: str | Path) -> dict[str, Any]:
         """Sync a single note file to the graph.
 
+        Uses source-aware reconciliation: only modifies edges with
+        source="file:{path}", preserving agent/extraction-created edges.
+
         Args:
             file_path: Absolute path to the markdown file.
 
@@ -48,17 +51,16 @@ class NoteSynchronizer:
         if not path.exists():
             return {"success": False, "error": f"File not found: {path}"}
 
-        # 1. Parse Note
+        source_id = generate_source_id(SourceType.FILE, str(path))
+
         try:
             note = parse_note(path)
         except Exception as e:
             return {"success": False, "error": f"Failed to parse note: {e}"}
 
-        # 2. Identify/Create Main Node
         node_type = self._determine_node_type(note)
         node_id = generate_node_id(node_type, note.title)
 
-        # Upsert node
         props = {
             "path": str(path),
             "title": note.title,
@@ -66,7 +68,6 @@ class NoteSynchronizer:
             **note.frontmatter,
         }
 
-        # Check if node exists to decide add vs update
         existing = self.storage.get_node(node_id)
         if existing:
             self.storage.update_node(node_id, props)
@@ -75,15 +76,10 @@ class NoteSynchronizer:
             self.storage.add_node(node_type, node_id, note.title, props)
             action = "created"
 
-        # 3. Sync Edges (Wikilinks)
-        edge_stats = self._sync_wikilinks(node_id, note.wikilinks)
+        edge_stats = self._sync_wikilinks(node_id, note.wikilinks, source_id)
 
-        # 4. Sync Tags (as Edges or Properties)
-        # For now, let's treat tags as properties 'tags',
-        # but advanced usage might want Tag nodes.
         self.storage.update_node(node_id, {"tags": note.tags})
 
-        # 5. Update Vector Embedding
         self._update_embedding(node_id, node_type, note)
 
         return {
@@ -91,38 +87,35 @@ class NoteSynchronizer:
             "node_id": node_id,
             "action": action,
             "edges": edge_stats,
+            "source": source_id,
         }
 
     def _determine_node_type(self, note: ParsedNote) -> str:
         """Determine node type from frontmatter or default to Note."""
         if "type" in note.frontmatter:
             return note.frontmatter["type"]
-        # Can add more heuristics here (e.g. folder based)
         return NodeType.NOTE.value
 
-    def _sync_wikilinks(self, source_id: str, wikilinks: list[str]) -> dict:
-        """Diff and sync outgoing wikilinks."""
+    def _sync_wikilinks(
+        self, source_id: str, wikilinks: list[str], file_source: str
+    ) -> dict:
+        """Diff and sync outgoing wikilinks with source awareness.
+
+        Only modifies edges with source=file_source, preserving edges
+        created by agents or extraction.
+        """
         stats = {"added": 0, "removed": 0, "kept": 0}
 
-        # Get current outgoing WIKILINK edges
-        current_neighbors = self.storage.get_neighbors(
-            source_id, direction="out", edge_types=[EdgeType.WIKILINK.value]
+        current_edges = self.storage.get_edges_by_source(
+            source_id, source=file_source, direction="out"
         )
 
-        # Map target_id -> edge_id for existing links
-        # Note: We need to know what the target ID *would* be for the wikilink text
-        # This is tricky because we don't know the type of the target node if it doesn't exist.
-        # Assumption: Wikilinks target other "Note" types or "Concept" types mostly.
-        # For simple sync, we'll assume target is Note if not found.
+        current_targets: dict[str, str] = {}
+        for edge in current_edges:
+            if edge.get("target_name"):
+                current_targets[edge["target_name"]] = edge["edge"]["id"]
 
-        current_targets = {
-            n["node"]["name"]: n["node"]["id"] for n in current_neighbors
-        }
-
-        # Determine desired state
         desired_links = set(wikilinks)
-
-        # Diff
         existing_link_names = set(current_targets.keys())
 
         to_add = desired_links - existing_link_names
@@ -131,51 +124,32 @@ class NoteSynchronizer:
 
         stats["kept"] = len(to_keep)
 
-        # Remove deleted links
         for target_name in to_remove:
-            # We need to find the specific edge to delete
-            # Since get_neighbors returns aggregated info, we might need a more specific query
-            # or just iterate connections from get_node.
-            # Optimized: Let's assume we can delete by pattern
-            target_id = current_targets[target_name]
-            # Use specific delete edge logic
-            # Find edges between source and target with type WIKILINK
-            edges = self.storage.find_edges(
-                from_id=source_id, to_id=target_id, relation=EdgeType.WIKILINK.value
-            )
-            for edge in edges:
-                self.storage.delete_edge(edge["edge"]["id"])
+            edge_id = current_targets[target_name]
+            self.storage.delete_edge(edge_id)
             stats["removed"] += 1
 
-        # Add new links
         for target_name in to_add:
-            # We need a target ID.
-            # Strategy:
-            # 1. Try to find a node with this name (fuzzy/exact).
-            # 2. If not found, create a placeholder Note node.
-
             matches = self.storage.find_nodes(target_name, match_type="exact")
             if matches:
                 target_id = matches[0]["id"]
             else:
-                # Create placeholder
                 target_type = NodeType.NOTE.value
                 target_id = generate_node_id(target_type, target_name)
-                # Only create if it really doesn't exist (find_nodes check might be loose)
                 if not self.storage.get_node(target_id):
                     self.storage.add_node(
                         target_type, target_id, target_name, {"placeholder": True}
                     )
 
-            # Create edge
-            self.storage.add_edge(source_id, target_id, EdgeType.WIKILINK.value)
+            self.storage.add_edge(
+                source_id, target_id, EdgeType.WIKILINK.value, source=file_source
+            )
             stats["added"] += 1
 
         return stats
 
     def _update_embedding(self, node_id: str, node_type: str, note: ParsedNote):
         """Update vector store embedding."""
-        # Create rich text representation
         text = f"# {note.title}\n\n"
         if note.tags:
             text += f"Tags: {', '.join(note.tags)}\n"
@@ -183,8 +157,6 @@ class NoteSynchronizer:
 
         embedding = self.embedder.embed(text)
 
-        # Update/Add entity
-        # We treat every Note as an Entity in the vector store for semantic search
         self.vectors.add_entity(
             node_id=node_id,
             node_type=node_type,

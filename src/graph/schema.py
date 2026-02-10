@@ -7,6 +7,29 @@ from dataclasses import dataclass
 from enum import Enum
 
 
+class SourceType(Enum):
+    """Provenance types for graph data."""
+
+    FILE = "file"  # From physical .md files (wikilinks, tags, YAML)
+    AGENT = "agent"  # Manual additions by agents during conversation
+    EXTRACTION = "extraction"  # LLM-extracted semantic relations
+    SYSTEM = "system"  # Initial setup or system-generated
+
+
+def generate_source_id(source_type: SourceType, identifier: str = "") -> str:
+    """Generate a canonical source ID.
+
+    Format: {type}:{identifier} or just {type} for AGENT
+    Examples:
+        file:/vault/Projects/AI.md
+        agent
+        extraction:v1:/vault/Projects/AI.md
+    """
+    if source_type == SourceType.AGENT:
+        return "agent"
+    return f"{source_type.value}:{identifier}"
+
+
 class NodeType(Enum):
     """Valid node types in the knowledge graph."""
 
@@ -28,11 +51,9 @@ class NodeType(Enum):
 class EdgeType(Enum):
     """Valid edge/relationship types in the knowledge graph."""
 
-    # Structural (from parsing)
     WIKILINK = "wikilink"
     TAGGED_WITH = "tagged_with"
 
-    # Semantic (from extraction/agent)
     CONTRIBUTES_TO = "CONTRIBUTES_TO"
     WORKS_ON = "WORKS_ON"
     MENTIONS = "MENTIONS"
@@ -55,7 +76,6 @@ class EdgeType(Enum):
     PART_OF = "PART_OF"
 
 
-# Schema constraints: which source -> target combinations are valid
 EDGE_CONSTRAINTS: dict[EdgeType, dict] = {
     EdgeType.CONTRIBUTES_TO: {
         "sources": [NodeType.PROJECT, NodeType.GOAL],
@@ -109,7 +129,6 @@ EDGE_CONSTRAINTS: dict[EdgeType, dict] = {
         "sources": [NodeType.BELIEF, NodeType.CONCEPT],
         "targets": [NodeType.BELIEF, NodeType.CONCEPT],
     },
-    # Unconstrained edges (any source/target allowed)
     EdgeType.RELATED_TO: {"sources": None, "targets": None},
     EdgeType.MENTIONS: {"sources": None, "targets": None},
     EdgeType.WIKILINK: {"sources": None, "targets": None},
@@ -156,7 +175,6 @@ def validate_edge(
     errors = []
     warnings = []
 
-    # Check node types
     if not validate_node_type(from_type):
         msg = f"Unknown source node type: {from_type}"
         if strict:
@@ -171,7 +189,6 @@ def validate_edge(
         else:
             warnings.append(msg)
 
-    # Check edge type
     if not validate_edge_type(relation):
         msg = f"Unknown edge type: {relation}"
         if strict:
@@ -182,7 +199,6 @@ def validate_edge(
             valid=len(errors) == 0, errors=errors, warnings=warnings
         )
 
-    # Check constraints if they exist
     try:
         edge_type = EdgeType(relation)
         constraints = EDGE_CONSTRAINTS.get(edge_type)
@@ -234,13 +250,10 @@ def generate_node_id(node_type: str, name: str) -> str:
     Returns:
         Canonical node ID
     """
-    # Normalize: lowercase, replace spaces/hyphens with underscores
     normalized = name.lower().strip()
     normalized = normalized.replace(" ", "_").replace("-", "_")
-    # Remove consecutive underscores
     while "__" in normalized:
         normalized = normalized.replace("__", "_")
-    # Remove leading/trailing underscores
     normalized = normalized.strip("_")
 
     return f"{node_type.lower()}:{normalized}"
