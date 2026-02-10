@@ -1,5 +1,5 @@
 [project]
-name = "obsidian-brain"
+name = "second-graph"
 version = "0.1.0"
 description = "Knowledge graph for Obsidian vaults - AI agent memory system"
 readme = "README.md"
@@ -30,9 +30,9 @@ obsidian-brain = "src.cli:cli"
 obsidian-brain-mcp = "src.mcp:main"
 
 [tool.setuptools]
-packages = ["src", "src.graph", "src.graph.tests", "src.parser", "src.parser.tests", "src.vector", "src.vector.tests", "src.extraction", "src.mcp", "src.mcp.tests"]
+packages = ["src", "src.graph", "src.graph.tests", "src.parser", "src.parser.tests", "src.vector", "src.vector.tests", "src.extraction", "src.extraction.tests", "src.mcp", "src.mcp.tests"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
-testpaths = ["src/graph/tests", "src/vector/tests", "src/mcp/tests", "src/parser/tests"]
+testpaths = ["src/graph/tests", "src/vector/tests", "src/mcp/tests", "src/parser/tests", "src/extraction/tests"]
 asyncio_mode = "auto"
