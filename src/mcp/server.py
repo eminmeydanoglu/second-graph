@@ -10,11 +10,9 @@ from ..graph.neo4j_storage import Neo4jStorage
 from ..graph.schema import (
     NodeType,
     EdgeType,
-    SourceType,
     validate_node_type,
     validate_edge,
     generate_node_id,
-    generate_source_id,
     get_node_types,
     get_edge_types,
 )
@@ -428,11 +426,11 @@ def _require_synchronizer() -> NoteSynchronizer:
 
 
 @mcp.tool()
-def sync_note(path: str) -> dict:
-    """Sync a markdown note file to the knowledge graph.
+def source_note(path: str) -> dict:
+    """Source a markdown note file into the knowledge graph.
 
-    Uses source-aware reconciliation: only modifies edges that came from
-    this file (source="file:{path}"), preserving agent/extraction edges.
+    Parses the note, creates/updates nodes, and reconciles wikilink edges.
+    Only modifies edges from this file (source="file:{path}"), preserving agent edges.
 
     Args:
         path: Absolute path to the markdown file
@@ -441,53 +439,7 @@ def sync_note(path: str) -> dict:
         Dict with sync results (node_id, action, edges changed, source)
     """
     sync = _require_synchronizer()
-    return sync.sync_note(path)
-
-
-@mcp.tool()
-def add_agent_edge(
-    from_id: str,
-    to_id: str,
-    relation: str,
-    properties: dict | None = None,
-) -> dict:
-    """Create a relationship with agent provenance.
-
-    Use this when the agent (not file parsing) discovers a relationship.
-    These edges are preserved when files are re-synced.
-
-    Args:
-        from_id: Source node ID
-        to_id: Target node ID
-        relation: Relationship type
-        properties: Optional additional properties
-
-    Returns:
-        Dict with edge details
-    """
-    db = _require_storage()
-
-    source_node = db.get_node(from_id)
-    target_node = db.get_node(to_id)
-
-    if not source_node:
-        return {"success": False, "error": f"Source node not found: {from_id}"}
-    if not target_node:
-        return {"success": False, "error": f"Target node not found: {to_id}"}
-
-    source_type = source_node["node"].get("_labels", ["Unknown"])[0]
-    target_type = target_node["node"].get("_labels", ["Unknown"])[0]
-
-    validation = validate_edge(source_type, target_type, relation)
-    if not validation.valid:
-        return {"success": False, "errors": validation.errors}
-
-    source_id = generate_source_id(SourceType.AGENT)
-
-    result = db.add_edge(from_id, to_id, relation, properties, source=source_id)
-    if result.get("success"):
-        result["source"] = source_id
-    return result
+    return sync.source_note(path)
 
 
 def _require_tracker() -> NoteTracker:
