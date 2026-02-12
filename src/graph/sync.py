@@ -35,11 +35,11 @@ class NoteSynchronizer:
         self.vectors = vectors
         self.embedder = embedder
 
-    def sync_note(self, file_path: str | Path) -> dict[str, Any]:
-        """Sync a single note file to the graph.
+    def source_note(self, file_path: str | Path) -> dict[str, Any]:
+        """Source a single note file into the graph.
 
-        Uses source-aware reconciliation: only modifies edges with
-        source="file:{path}", preserving agent/extraction-created edges.
+        Parses the note, creates/updates nodes, and reconciles wikilink edges.
+        Only modifies edges with source="file:{path}", preserving agent edges.
 
         Args:
             file_path: Absolute path to the markdown file.
