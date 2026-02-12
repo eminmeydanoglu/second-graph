@@ -264,13 +264,13 @@ def add_edge(
     source_type = source_node["node"].get("_labels", ["Unknown"])[0]
     target_type = target_node["node"].get("_labels", ["Unknown"])[0]
 
-    validation = validate_edge(source_type, target_type, relation)
+    validation = validate_edge(source_type, target_type, relation, strict=True)
     if not validation.valid:
         return {"success": False, "errors": validation.errors}
-    if validation.warnings:
-        pass
 
     result = db.add_edge(from_id, to_id, relation, properties)
+    if validation.warnings:
+        result["warnings"] = validation.warnings
     return result
 
 
@@ -430,13 +430,14 @@ def source_note(path: str) -> dict:
     """Source a markdown note file into the knowledge graph.
 
     Parses the note, creates/updates nodes, and reconciles wikilink edges.
-    Only modifies edges from this file (source="file:{path}"), preserving agent edges.
+    Only modifies WIKILINK edges with source_note=node_id for this note,
+    preserving edges from other notes or other relation types.
 
     Args:
         path: Absolute path to the markdown file
 
     Returns:
-        Dict with sync results (node_id, action, edges changed, source)
+        Dict with sync results (node_id, action, edges changed, source_note)
     """
     sync = _require_synchronizer()
     return sync.source_note(path)

@@ -2,12 +2,10 @@
 
 from pathlib import Path
 import subprocess
-from unittest.mock import Mock, MagicMock
 
 import pytest
 
 from src.mcp import server as mcp_server
-from src.graph.schema import SourceType, generate_source_id
 
 
 class _FakeStorage:
@@ -18,6 +16,31 @@ class _FakeStorage:
 
     def merge_nodes_simple(self, keep_id: str, merge_id: str) -> dict:
         return {"merged": False, "edges_transferred": 0, "error": "node not found"}
+
+    def get_node(self, node_id: str) -> dict | None:
+        """Return a fake node for validation tests."""
+        if node_id.startswith("goal:"):
+            return {
+                "node": {"_labels": ["Goal"], "id": node_id, "name": "Fake"},
+                "connections": [],
+            }
+        if node_id.startswith("person:"):
+            return {
+                "node": {"_labels": ["Person"], "id": node_id, "name": "Fake"},
+                "connections": [],
+            }
+        return None
+
+    def add_edge(self, from_id, to_id, relation, properties=None, source_note=None):
+        return {
+            "success": True,
+            "edge_id": "edge:fake",
+            "from_id": from_id,
+            "to_id": to_id,
+            "relation": relation,
+            "from_name": "F",
+            "to_name": "T",
+        }
 
 
 class _FakeVectors:
@@ -49,6 +72,37 @@ class TestMCPFailurePropagation:
 
         assert result["success"] is False
         assert result["merged"] is False
+
+
+class TestStrictValidation:
+    """Tests for strict schema validation in MCP add_edge."""
+
+    def test_add_edge_rejects_unknown_edge_type(self, monkeypatch):
+        """MCP add_edge should reject unknown relation types."""
+        monkeypatch.setattr(mcp_server, "storage", _FakeStorage())
+
+        result = mcp_server.add_edge("person:x", "goal:y", "FAKE_RELATION")
+
+        assert result["success"] is False
+        assert any("Unknown edge type" in e for e in result["errors"])
+
+    def test_add_edge_rejects_invalid_constraint(self, monkeypatch):
+        """MCP add_edge should reject invalid source/target type combos."""
+        monkeypatch.setattr(mcp_server, "storage", _FakeStorage())
+
+        # Person -> Goal via CONTRIBUTES_TO is invalid (Person not in valid sources)
+        result = mcp_server.add_edge("person:x", "goal:y", "CONTRIBUTES_TO")
+
+        assert result["success"] is False
+        assert len(result["errors"]) > 0
+
+    def test_add_edge_passes_valid_combo(self, monkeypatch):
+        """MCP add_edge should allow valid combos."""
+        monkeypatch.setattr(mcp_server, "storage", _FakeStorage())
+
+        result = mcp_server.add_edge("person:x", "goal:y", "HAS_GOAL")
+
+        assert result["success"] is True
 
 
 class TestCLIEntrypoint:
@@ -83,102 +137,8 @@ class TestCLIEntrypoint:
         assert script.exists()
 
 
-class _FakeSynchronizer:
-    """Fake synchronizer for testing."""
-
-    def sync_note(self, path):
-        return {
-            "success": True,
-            "node_id": "note:test",
-            "action": "created",
-            "edges": {"added": 1, "removed": 0, "kept": 0},
-            "source": f"file:{path}",
-        }
-
-
-class _FakeStorageWithNodes:
-    """Fake storage that simulates nodes existing."""
-
-    def get_node(self, node_id):
-        return {
-            "node": {"id": node_id, "name": "Test", "_labels": ["Note"]},
-            "connections": [],
-        }
-
-    def add_edge(self, from_id, to_id, relation, properties=None, source=None):
-        return {
-            "success": True,
-            "edge_id": "edge:test123",
-            "from_id": from_id,
-            "to_id": to_id,
-            "from_name": "From",
-            "to_name": "To",
-            "relation": relation,
-        }
-
-
-class TestSyncNoteToolUnit:
-    """Unit tests for sync_note MCP tool."""
-
-    def test_sync_note_calls_synchronizer(self, monkeypatch):
-        """sync_note should delegate to NoteSynchronizer."""
-        fake_sync = _FakeSynchronizer()
-        monkeypatch.setattr(mcp_server, "synchronizer", fake_sync)
-
-        result = mcp_server.sync_note("/vault/Test.md")
-
-        assert result["success"] is True
-        assert result["node_id"] == "note:test"
-        assert result["source"] == "file:/vault/Test.md"
-
-    def test_sync_note_requires_init(self, monkeypatch):
-        """sync_note should fail if server not initialized."""
-        monkeypatch.setattr(mcp_server, "synchronizer", None)
-
-        with pytest.raises(RuntimeError, match="not initialized"):
-            mcp_server.sync_note("/vault/Test.md")
-
-
-class TestAddAgentEdgeToolUnit:
-    """Unit tests for add_agent_edge MCP tool."""
-
-    def test_add_agent_edge_sets_source(self, monkeypatch):
-        """add_agent_edge should set agent source on edge."""
-        fake_storage = _FakeStorageWithNodes()
-        monkeypatch.setattr(mcp_server, "storage", fake_storage)
-
-        result = mcp_server.add_agent_edge(
-            from_id="note:a",
-            to_id="note:b",
-            relation="RELATED_TO",
-        )
-
-        assert result["success"] is True
-        assert result["source"] == "agent"
-
-    def test_add_agent_edge_missing_source_node(self, monkeypatch):
-        """add_agent_edge should fail if source node missing."""
-
-        class StorageMissingNode:
-            def get_node(self, node_id):
-                if node_id == "note:missing":
-                    return None
-                return {"node": {"_labels": ["Note"]}, "connections": []}
-
-        monkeypatch.setattr(mcp_server, "storage", StorageMissingNode())
-
-        result = mcp_server.add_agent_edge(
-            from_id="note:missing",
-            to_id="note:b",
-            relation="RELATED_TO",
-        )
-
-        assert result["success"] is False
-        assert "not found" in result["error"]
-
-
 class TestSyncNoteToolIntegration:
-    """Integration tests for sync_note with real Neo4j."""
+    """Integration tests for source_note with real Neo4j."""
 
     @pytest.fixture
     def init_server(self, tmp_path):
@@ -197,8 +157,8 @@ class TestSyncNoteToolIntegration:
         except Exception as e:
             pytest.skip(f"Neo4j not available: {e}")
 
-    def test_sync_note_integration(self, init_server, tmp_path):
-        """Test sync_note with real storage."""
+    def test_source_note_integration(self, init_server, tmp_path):
+        """Test source_note with real storage."""
         note = tmp_path / "Integration Test.md"
         note.write_text(
             """---
@@ -210,29 +170,10 @@ Links to [[Target Note]].
 """
         )
 
-        result = mcp_server.sync_note(str(note))
+        result = mcp_server.source_note(str(note))
 
         assert result["success"] is True
         assert result["action"] == "created"
         assert result["edges"]["added"] == 1
-        assert "source" in result
-        assert result["source"].startswith("file:")
-
-    def test_add_agent_edge_integration(self, init_server):
-        """Test add_agent_edge with real storage."""
-        # Create nodes first
-        mcp_server.storage.add_node("Note", "note:int_a", "Int A", {})
-        mcp_server.storage.add_node("Note", "note:int_b", "Int B", {})
-
-        result = mcp_server.add_agent_edge(
-            from_id="note:int_a",
-            to_id="note:int_b",
-            relation="RELATED_TO",
-        )
-
-        assert result["success"] is True
-        assert result["source"] == "agent"
-
-        # Verify edge has source
-        edge = mcp_server.storage.get_edge(result["edge_id"])
-        assert edge["edge"]["source"] == "agent"
+        assert "source_note" in result
+        assert result["source_note"].startswith("note:")
