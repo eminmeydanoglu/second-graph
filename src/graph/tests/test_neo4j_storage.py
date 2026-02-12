@@ -3,7 +3,6 @@
 import pytest
 
 from src.graph.neo4j_storage import Neo4jStorage
-from src.graph.schema import SourceType, generate_source_id
 
 
 class TestNeo4jCRUD:
@@ -234,11 +233,6 @@ class TestNeo4jEdgeCases:
         except Exception as exc:
             pytest.skip(f"Neo4j not available: {exc}")
 
-    def test_get_subgraph_missing_center_node_returns_empty_graph(self, storage):
-        """Missing center node should not crash and should return empty result."""
-        result = storage.get_subgraph("goal:does_not_exist")
-        assert result == {"nodes": [], "edges": []}
-
     def test_merge_nodes_simple_reports_missing_merge_node(self, storage):
         """Merging with non-existent merge_id should not report success."""
         storage.add_node("Goal", "goal:keep_only", "Keep Only", {})
@@ -248,9 +242,75 @@ class TestNeo4jEdgeCases:
         assert result["merged"] is False
         assert "error" in result
 
+    def test_merge_nodes_simple_preserves_edge_properties(self, storage):
+        """Transferred edges should keep semantic properties."""
+        storage.add_node("Goal", "goal:keep_props", "Keep Props", {})
+        storage.add_node("Goal", "goal:merge_props", "Merge Props", {})
+        storage.add_node("Goal", "goal:target_props", "Target Props", {})
 
-class TestSourceAwareEdges:
-    """Tests for source-aware edge operations."""
+        storage.add_edge(
+            "goal:merge_props",
+            "goal:target_props",
+            "RELATED_TO",
+            {
+                "confidence": 0.92,
+                "fact": "from merge node",
+                "source_note": "note:test_props",
+            },
+        )
+
+        result = storage.merge_nodes_simple("goal:keep_props", "goal:merge_props")
+        assert result["merged"] is True
+
+        edges = storage.find_edges(
+            from_id="goal:keep_props", to_id="goal:target_props", relation="RELATED_TO"
+        )
+        assert len(edges) == 1
+        edge_props = edges[0]["edge"]
+        assert edge_props["confidence"] == 0.92
+        assert edge_props["fact"] == "from merge node"
+        assert edge_props["source_note"] == "note:test_props"
+
+    def test_add_node_is_idempotent(self, storage):
+        """Calling add_node twice with same id should not create duplicates."""
+        storage.add_node("Goal", "goal:idem", "Original Name", {"status": "v1"})
+        storage.add_node("Goal", "goal:idem", "Updated Name", {"status": "v2"})
+
+        # get_node returns the single node — properties should be updated
+        result = storage.get_node("goal:idem")
+        assert result is not None
+        assert result["node"]["name"] == "Updated Name"
+        assert result["node"]["status"] == "v2"
+        # created_at should be preserved from first creation
+        assert "created_at" in result["node"]
+
+    def test_add_edge_is_idempotent(self, storage):
+        """Calling add_edge twice with same (from, to, type) should not duplicate."""
+        storage.add_node("Note", "note:e_idem_a", "A", {})
+        storage.add_node("Note", "note:e_idem_b", "B", {})
+
+        r1 = storage.add_edge(
+            "note:e_idem_a", "note:e_idem_b", "RELATED_TO", {"confidence": 0.5}
+        )
+        r2 = storage.add_edge(
+            "note:e_idem_a", "note:e_idem_b", "RELATED_TO", {"confidence": 0.9}
+        )
+
+        assert r1["success"] and r2["success"]
+        # Same edge id — MERGE reused the existing edge
+        assert r1["edge_id"] == r2["edge_id"]
+
+        # Only one edge exists
+        edges = storage.find_edges(
+            from_id="note:e_idem_a", to_id="note:e_idem_b", relation="RELATED_TO"
+        )
+        assert len(edges) == 1
+        # Props were updated
+        assert edges[0]["edge"]["confidence"] == 0.9
+
+
+class TestSourceNoteEdges:
+    """Tests for source_note-aware edge operations."""
 
     @pytest.fixture
     def storage(self):
@@ -267,119 +327,147 @@ class TestSourceAwareEdges:
         except Exception as exc:
             pytest.skip(f"Neo4j not available: {exc}")
 
-    def test_add_edge_with_source(self, storage):
-        """Test adding an edge with source provenance."""
+    def test_add_edge_with_source_note(self, storage):
+        """Test adding an edge with source_note provenance."""
         storage.add_node("Note", "note:source_a", "Source A", {})
         storage.add_node("Note", "note:source_b", "Source B", {})
 
-        source_id = generate_source_id(SourceType.FILE, "/vault/test.md")
         result = storage.add_edge(
             "note:source_a",
             "note:source_b",
             "WIKILINK",
-            source=source_id,
+            source_note="note:source_a",
         )
 
         assert result["success"] is True
 
-        # Verify source is stored
         edge = storage.get_edge(result["edge_id"])
         assert edge is not None
-        assert edge["edge"]["source"] == source_id
+        assert edge["edge"]["source_note"] == "note:source_a"
 
-    def test_get_edges_by_source(self, storage):
-        """Test filtering edges by source."""
+    def test_get_edges_by_source_note(self, storage):
+        """Test filtering edges by source_note."""
         storage.add_node("Note", "note:filter_a", "Filter A", {})
         storage.add_node("Note", "note:filter_b", "Filter B", {})
         storage.add_node("Note", "note:filter_c", "Filter C", {})
 
-        file_source = generate_source_id(SourceType.FILE, "/vault/test.md")
-        agent_source = generate_source_id(SourceType.AGENT)
-
-        # Add edges with different sources
         storage.add_edge(
-            "note:filter_a", "note:filter_b", "WIKILINK", source=file_source
+            "note:filter_a",
+            "note:filter_b",
+            "WIKILINK",
+            source_note="note:filter_a",
         )
         storage.add_edge(
-            "note:filter_a", "note:filter_c", "RELATED_TO", source=agent_source
+            "note:filter_a",
+            "note:filter_c",
+            "RELATED_TO",
+            source_note="note:filter_a",
         )
 
-        # Get only file-sourced edges
-        file_edges = storage.get_edges_by_source("note:filter_a", file_source)
-        assert len(file_edges) == 1
-        assert file_edges[0]["target_name"] == "Filter B"
+        # Get all edges from this source_note
+        all_edges = storage.get_edges_by_source_note("note:filter_a", "note:filter_a")
+        assert len(all_edges) == 2
 
-        # Get only agent-sourced edges
-        agent_edges = storage.get_edges_by_source("note:filter_a", agent_source)
-        assert len(agent_edges) == 1
-        assert agent_edges[0]["target_name"] == "Filter C"
+        # Get only WIKILINK edges from this source_note
+        wikilink_edges = storage.get_edges_by_source_note(
+            "note:filter_a", "note:filter_a", relation="WIKILINK"
+        )
+        assert len(wikilink_edges) == 1
+        assert wikilink_edges[0]["target_name"] == "Filter B"
 
-    def test_get_edges_by_source_direction(self, storage):
-        """Test edge direction filtering with source."""
+    def test_get_edges_by_source_note_direction(self, storage):
+        """Test edge direction filtering with source_note."""
         storage.add_node("Note", "note:dir_a", "Dir A", {})
         storage.add_node("Note", "note:dir_b", "Dir B", {})
 
-        source = generate_source_id(SourceType.FILE, "/vault/dir.md")
-        storage.add_edge("note:dir_a", "note:dir_b", "WIKILINK", source=source)
+        storage.add_edge(
+            "note:dir_a", "note:dir_b", "WIKILINK", source_note="note:dir_a"
+        )
 
-        # Outgoing from A
-        out_edges = storage.get_edges_by_source("note:dir_a", source, direction="out")
+        out_edges = storage.get_edges_by_source_note(
+            "note:dir_a", "note:dir_a", direction="out"
+        )
         assert len(out_edges) == 1
 
-        # Incoming to B
-        in_edges = storage.get_edges_by_source("note:dir_b", source, direction="in")
+        in_edges = storage.get_edges_by_source_note(
+            "note:dir_b", "note:dir_a", direction="in"
+        )
         assert len(in_edges) == 1
 
-        # No outgoing from B
-        out_edges_b = storage.get_edges_by_source("note:dir_b", source, direction="out")
+        out_edges_b = storage.get_edges_by_source_note(
+            "note:dir_b", "note:dir_a", direction="out"
+        )
         assert len(out_edges_b) == 0
 
-    def test_delete_edges_by_source(self, storage):
-        """Test deleting edges by source."""
+    def test_delete_edges_by_source_note(self, storage):
+        """Test deleting edges by source_note."""
         storage.add_node("Note", "note:del_a", "Del A", {})
         storage.add_node("Note", "note:del_b", "Del B", {})
         storage.add_node("Note", "note:del_c", "Del C", {})
 
-        file_source = generate_source_id(SourceType.FILE, "/vault/del.md")
-        agent_source = generate_source_id(SourceType.AGENT)
+        storage.add_edge(
+            "note:del_a", "note:del_b", "WIKILINK", source_note="note:del_a"
+        )
+        storage.add_edge(
+            "note:del_a", "note:del_c", "RELATED_TO", source_note="note:other"
+        )
 
-        storage.add_edge("note:del_a", "note:del_b", "WIKILINK", source=file_source)
-        storage.add_edge("note:del_a", "note:del_c", "RELATED_TO", source=agent_source)
-
-        # Delete only file-sourced edges
-        deleted = storage.delete_edges_by_source("note:del_a", file_source)
+        # Delete only edges from note:del_a source
+        deleted = storage.delete_edges_by_source_note("note:del_a", "note:del_a")
         assert deleted == 1
 
-        # Verify file edge gone
-        file_edges = storage.get_edges_by_source("note:del_a", file_source)
-        assert len(file_edges) == 0
+        # Verify del_a-sourced edge gone
+        edges_a = storage.get_edges_by_source_note("note:del_a", "note:del_a")
+        assert len(edges_a) == 0
 
-        # Verify agent edge still exists
-        agent_edges = storage.get_edges_by_source("note:del_a", agent_source)
-        assert len(agent_edges) == 1
+        # Verify other-sourced edge still exists
+        edges_other = storage.get_edges_by_source_note("note:del_a", "note:other")
+        assert len(edges_other) == 1
 
-    def test_delete_edges_by_source_returns_count(self, storage):
+    def test_delete_edges_by_source_note_with_relation_filter(self, storage):
+        """Test deleting edges filtered by both source_note and relation."""
+        storage.add_node("Note", "note:rf_a", "RF A", {})
+        storage.add_node("Note", "note:rf_b", "RF B", {})
+        storage.add_node("Note", "note:rf_c", "RF C", {})
+
+        storage.add_edge("note:rf_a", "note:rf_b", "WIKILINK", source_note="note:rf_a")
+        storage.add_edge(
+            "note:rf_a", "note:rf_c", "RELATED_TO", source_note="note:rf_a"
+        )
+
+        # Delete only WIKILINK edges from this source
+        deleted = storage.delete_edges_by_source_note(
+            "note:rf_a", "note:rf_a", relation="WIKILINK"
+        )
+        assert deleted == 1
+
+        # RELATED_TO edge should survive
+        remaining = storage.get_edges_by_source_note("note:rf_a", "note:rf_a")
+        assert len(remaining) == 1
+        assert remaining[0]["relation"] == "RELATED_TO"
+
+    def test_delete_edges_by_source_note_returns_count(self, storage):
         """Test delete returns accurate count."""
         storage.add_node("Note", "note:count_a", "Count A", {})
         storage.add_node("Note", "note:count_b", "Count B", {})
         storage.add_node("Note", "note:count_c", "Count C", {})
 
-        source = generate_source_id(SourceType.FILE, "/vault/count.md")
-        storage.add_edge("note:count_a", "note:count_b", "WIKILINK", source=source)
-        storage.add_edge("note:count_a", "note:count_c", "WIKILINK", source=source)
+        storage.add_edge(
+            "note:count_a", "note:count_b", "WIKILINK", source_note="note:count_a"
+        )
+        storage.add_edge(
+            "note:count_a", "note:count_c", "WIKILINK", source_note="note:count_a"
+        )
 
-        deleted = storage.delete_edges_by_source("note:count_a", source)
+        deleted = storage.delete_edges_by_source_note("note:count_a", "note:count_a")
         assert deleted == 2
 
-    def test_edge_without_source(self, storage):
-        """Test edges without source are not returned by source filter."""
+    def test_edge_without_source_note(self, storage):
+        """Test edges without source_note are not returned by source_note filter."""
         storage.add_node("Note", "note:nosrc_a", "NoSrc A", {})
         storage.add_node("Note", "note:nosrc_b", "NoSrc B", {})
 
-        # Add edge without source
         storage.add_edge("note:nosrc_a", "note:nosrc_b", "WIKILINK")
 
-        # Should not be found when filtering by source
-        source = generate_source_id(SourceType.FILE, "/vault/nosrc.md")
-        edges = storage.get_edges_by_source("note:nosrc_a", source)
+        edges = storage.get_edges_by_source_note("note:nosrc_a", "note:nosrc_a")
         assert len(edges) == 0

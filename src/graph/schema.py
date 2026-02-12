@@ -7,29 +7,6 @@ from dataclasses import dataclass
 from enum import Enum
 
 
-class SourceType(Enum):
-    """Provenance types for graph data."""
-
-    FILE = "file"  # From physical .md files (wikilinks, tags, YAML)
-    AGENT = "agent"  # Manual additions by agents during conversation
-    EXTRACTION = "extraction"  # LLM-extracted semantic relations
-    SYSTEM = "system"  # Initial setup or system-generated
-
-
-def generate_source_id(source_type: SourceType, identifier: str = "") -> str:
-    """Generate a canonical source ID.
-
-    Format: {type}:{identifier} or just {type} for AGENT
-    Examples:
-        file:/vault/Projects/AI.md
-        agent
-        extraction:v1:/vault/Projects/AI.md
-    """
-    if source_type == SourceType.AGENT:
-        return "agent"
-    return f"{source_type.value}:{identifier}"
-
-
 class NodeType(Enum):
     """Valid node types in the knowledge graph."""
 

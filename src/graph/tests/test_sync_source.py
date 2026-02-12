@@ -1,10 +1,10 @@
-"""Tests for source-aware reconciliation in NoteSynchronizer.
+"""Tests for source_note-aware reconciliation in NoteSynchronizer.
 
 Key scenario:
-- Note A links to Note B (source: file)
-- Agent adds Note A -> Note C (source: agent)
+- Note A links to Note B (source_note: note:note_a)
+- Agent adds Note A -> Note C as RELATED_TO (different relation, no source_note)
 - Note A is updated, B link removed
-- Expectation: B edge deleted, C edge PRESERVED
+- Expectation: B wikilink deleted, C edge PRESERVED (different relation type)
 """
 
 from pathlib import Path
@@ -14,12 +14,12 @@ import pytest
 
 from src.graph.sync import NoteSynchronizer
 from src.graph.neo4j_storage import Neo4jStorage
-from src.graph.schema import SourceType, generate_source_id, EdgeType
+from src.graph.schema import EdgeType, generate_node_id
 from src.vector.store import VectorStore
 from src.vector.embedder import Embedder
 
 
-class TestSourceAwareReconciliation:
+class TestSourceNoteReconciliation:
     @pytest.fixture
     def workspace(self, tmp_path):
         return tmp_path
@@ -53,10 +53,10 @@ class TestSourceAwareReconciliation:
     def synchronizer(self, storage, vectors, embedder):
         return NoteSynchronizer(storage, vectors, embedder)
 
-    def test_agent_edge_preserved_after_file_sync(
+    def test_non_wikilink_edge_preserved_after_sync(
         self, synchronizer, workspace, storage
     ):
-        """Core test: Agent-created edges survive file re-sync."""
+        """Non-WIKILINK edges survive wikilink re-sync."""
         note_a = workspace / "Note A.md"
         note_a.write_text(
             """---
@@ -68,30 +68,35 @@ Link to [[Note B]].
 """
         )
 
-        result = synchronizer.sync_note(note_a)
+        result = synchronizer.source_note(note_a)
         assert result["success"]
         assert result["edges"]["added"] == 1
 
         node_a_id = result["node_id"]
-        file_source = result["source"]
 
-        file_edges = storage.get_edges_by_source(node_a_id, file_source)
-        assert len(file_edges) == 1
-        assert file_edges[0]["target_name"] == "Note B"
+        # Verify wikilink edge exists
+        wikilink_edges = storage.get_edges_by_source_note(
+            node_a_id, node_a_id, relation="WIKILINK"
+        )
+        assert len(wikilink_edges) == 1
+        assert wikilink_edges[0]["target_name"] == "Note B"
 
+        # Agent adds a RELATED_TO edge (not a wikilink)
         storage.add_node("Note", "note:note_c", "Note C")
-        agent_source = generate_source_id(SourceType.AGENT)
         storage.add_edge(
             node_a_id,
             "note:note_c",
-            EdgeType.WIKILINK.value,
-            source=agent_source,
+            "RELATED_TO",
+            {"source_note": node_a_id},
         )
 
-        agent_edges = storage.get_edges_by_source(node_a_id, agent_source)
-        assert len(agent_edges) == 1
-        assert agent_edges[0]["target_name"] == "Note C"
+        # Verify RELATED_TO edge exists
+        related_edges = storage.get_edges_by_source_note(
+            node_a_id, node_a_id, relation="RELATED_TO"
+        )
+        assert len(related_edges) == 1
 
+        # Re-sync with different wikilinks
         note_a.write_text(
             """---
 type: Note
@@ -102,55 +107,59 @@ Now links to [[Note D]] instead.
 """
         )
 
-        result2 = synchronizer.sync_note(note_a)
+        result2 = synchronizer.source_note(note_a)
         assert result2["success"]
         assert result2["edges"]["removed"] == 1  # B removed
         assert result2["edges"]["added"] == 1  # D added
 
-        agent_edges_after = storage.get_edges_by_source(node_a_id, agent_source)
-        assert len(agent_edges_after) == 1, "Agent edge should be preserved!"
-        assert agent_edges_after[0]["target_name"] == "Note C"
-
-        file_edges_after = storage.get_edges_by_source(node_a_id, file_source)
-        assert len(file_edges_after) == 1
-        assert file_edges_after[0]["target_name"] == "Note D"
-
-    def test_multiple_sources_independent(self, synchronizer, workspace, storage):
-        """Each source manages its own edges independently."""
-        note = workspace / "Multi Source.md"
-        note.write_text("# Multi Source\n\n[[Target A]]")
-
-        result = synchronizer.sync_note(note)
-        node_id = result["node_id"]
-        file_source = result["source"]
-
-        storage.add_node("Note", "note:agent_target", "Agent Target")
-        storage.add_node("Note", "note:extraction_target", "Extraction Target")
-
-        agent_source = generate_source_id(SourceType.AGENT)
-        extraction_source = generate_source_id(SourceType.EXTRACTION, "v1:" + str(note))
-
-        storage.add_edge(
-            node_id, "note:agent_target", "RELATED_TO", source=agent_source
+        # RELATED_TO edge should survive (different relation type)
+        related_edges_after = storage.get_edges_by_source_note(
+            node_a_id, node_a_id, relation="RELATED_TO"
         )
-        storage.add_edge(
-            node_id, "note:extraction_target", "MENTIONS", source=extraction_source
+        assert len(related_edges_after) == 1, "Non-wikilink edge should be preserved!"
+
+        # Wikilink now points to D
+        wikilink_edges_after = storage.get_edges_by_source_note(
+            node_a_id, node_a_id, relation="WIKILINK"
         )
+        assert len(wikilink_edges_after) == 1
+        assert wikilink_edges_after[0]["target_name"] == "Note D"
 
-        deleted = storage.delete_edges_by_source(node_id, extraction_source)
-        assert deleted == 1
-
-        assert len(storage.get_edges_by_source(node_id, file_source)) == 1
-        assert len(storage.get_edges_by_source(node_id, agent_source)) == 1
-        assert len(storage.get_edges_by_source(node_id, extraction_source)) == 0
-
-    def test_sync_returns_source_id(self, synchronizer, workspace):
-        """Sync result includes the source ID used."""
+    def test_sync_returns_source_note_id(self, synchronizer, workspace):
+        """Sync result includes source_note (the node_id)."""
         note = workspace / "Source Check.md"
         note.write_text("# Source Check\n\nContent.")
 
-        result = synchronizer.sync_note(note)
+        result = synchronizer.source_note(note)
 
-        assert "source" in result
-        assert result["source"].startswith("file:")
-        assert str(note) in result["source"]
+        assert "source_note" in result
+        assert result["source_note"].startswith("note:")
+
+    def test_wikilink_edges_from_other_notes_preserved(
+        self, synchronizer, workspace, storage
+    ):
+        """WIKILINK edges from a different source_note are not touched."""
+        note_a = workspace / "Note A.md"
+        note_a.write_text("# Note A\n\n[[Shared Target]]")
+
+        result_a = synchronizer.source_note(note_a)
+        node_a_id = result_a["node_id"]
+
+        # Manually add a WIKILINK from note_a's target with a different source_note
+        target_id = generate_node_id("Note", "Shared Target")
+        storage.add_edge(
+            target_id,
+            node_a_id,
+            "WIKILINK",
+            source_note=target_id,  # owned by the target note
+        )
+
+        # Re-sync note A — should not touch the reverse wikilink
+        note_a.write_text("# Note A\n\n[[Different Target]]")
+        result_a2 = synchronizer.source_note(note_a)
+
+        # The reverse wikilink (owned by target) should survive
+        reverse_edges = storage.get_edges_by_source_note(
+            target_id, target_id, relation="WIKILINK"
+        )
+        assert len(reverse_edges) == 1

@@ -125,7 +125,7 @@ class Neo4jStorage:
             session.run(query, edges=edge_list)
 
     def _create_indexes(self):
-        """Create indexes for common queries."""
+        """Create indexes and uniqueness constraints."""
         with self.driver.session() as session:
             for label in [
                 "Note",
@@ -143,7 +143,9 @@ class Neo4jStorage:
                 "Source",
             ]:
                 try:
-                    session.run(f"CREATE INDEX IF NOT EXISTS FOR (n:{label}) ON (n.id)")
+                    session.run(
+                        f"CREATE CONSTRAINT IF NOT EXISTS FOR (n:{label}) REQUIRE n.id IS UNIQUE"
+                    )
                     session.run(
                         f"CREATE INDEX IF NOT EXISTS FOR (n:{label}) ON (n.title)"
                     )
@@ -151,12 +153,15 @@ class Neo4jStorage:
                         f"CREATE INDEX IF NOT EXISTS FOR (n:{label}) ON (n.name)"
                     )
                 except Exception:
-                    pass  # Index might already exist
+                    pass
 
     def add_node(
         self, node_type: str, node_id: str, name: str, properties: dict | None = None
     ) -> dict | None:
-        """Create a new node.
+        """Create or update a node (idempotent).
+
+        Uses MERGE on id so duplicate calls are safe.
+        On first create, sets created_at. On match, preserves it.
 
         Args:
             node_type: The node label (Goal, Project, Person, etc.)
@@ -165,22 +170,25 @@ class Neo4jStorage:
             properties: Additional properties (status, priority, etc.)
 
         Returns:
-            Created node dict or None on failure
+            Node dict or None on failure
         """
         props = properties.copy() if properties else {}
-        props["id"] = node_id
         props["name"] = name
-        props["created_at"] = datetime.now().isoformat()
 
         sanitized_type = self._sanitize_label(node_type)
+        now = datetime.now().isoformat()
 
         with self.driver.session() as session:
             result = session.run(
                 f"""
-                CREATE (n:{sanitized_type} $props)
+                MERGE (n:{sanitized_type} {{id: $node_id}})
+                ON CREATE SET n += $props, n.created_at = $now
+                ON MATCH SET n += $props
                 RETURN n, labels(n) as labels
                 """,
+                node_id=node_id,
                 props=props,
+                now=now,
             )
             record = result.single()
             if record:
@@ -328,64 +336,6 @@ class Neo4jStorage:
 
             return {"deleted": deleted, "edges_removed": edge_count}
 
-    def merge_nodes(self, keep_id: str, merge_id: str) -> dict:
-        """Merge two nodes, transferring relationships from merge_id to keep_id.
-
-        Args:
-            keep_id: ID of node to keep
-            merge_id: ID of node to merge (will be deleted)
-
-        Returns:
-            Dict with merge status and transferred edge count
-        """
-        with self.driver.session() as session:
-            session.run(
-                """
-                MATCH (keep {id: $keep_id})
-                MATCH (merge {id: $merge_id})
-                MATCH (source)-[r]->(merge)
-                WHERE source <> keep AND source <> merge
-                WITH keep, source, type(r) as rel_type, properties(r) as rel_props
-                CALL apoc.create.relationship(source, rel_type, rel_props, keep) YIELD rel
-                RETURN count(rel)
-                """,
-                keep_id=keep_id,
-                merge_id=merge_id,
-            )
-
-            session.run(
-                """
-                MATCH (keep {id: $keep_id})
-                MATCH (merge {id: $merge_id})
-                MATCH (merge)-[r]->(target)
-                WHERE target <> keep AND target <> merge
-                WITH keep, target, type(r) as rel_type, properties(r) as rel_props
-                CALL apoc.create.relationship(keep, rel_type, rel_props, target) YIELD rel
-                RETURN count(rel)
-                """,
-                keep_id=keep_id,
-                merge_id=merge_id,
-            )
-
-            count_result = session.run(
-                """
-                MATCH (n {id: $id})-[r]-()
-                RETURN count(r) as transferred
-                """,
-                id=merge_id,
-            )
-            transferred = count_result.single()["transferred"]
-
-            session.run(
-                """
-                MATCH (n {id: $id})
-                DETACH DELETE n
-                """,
-                id=merge_id,
-            )
-
-            return {"merged": True, "edges_transferred": transferred}
-
     def merge_nodes_simple(self, keep_id: str, merge_id: str) -> dict:
         """Merge two nodes without APOC (simpler, creates new relationship types).
 
@@ -423,8 +373,8 @@ class Neo4jStorage:
                 OPTIONAL MATCH (merge)-[r_out]->(target)
                 WHERE target.id <> $keep_id
                 RETURN 
-                    collect(DISTINCT {source: source.id, type: type(r_in)}) as incoming,
-                    collect(DISTINCT {target: target.id, type: type(r_out)}) as outgoing
+                    collect(DISTINCT {source: source.id, type: type(r_in), props: properties(r_in)}) as incoming,
+                    collect(DISTINCT {target: target.id, type: type(r_out), props: properties(r_out)}) as outgoing
                 """,
                 merge_id=merge_id,
                 keep_id=keep_id,
@@ -434,25 +384,35 @@ class Neo4jStorage:
             outgoing = [e for e in record["outgoing"] if e["target"]]
 
             for edge in incoming:
+                rel_props = dict(edge.get("props") or {})
+                rel_props.pop("id", None)
+                rel_props.pop("created_at", None)
                 session.run(
                     f"""
                     MATCH (source {{id: $source_id}})
                     MATCH (keep {{id: $keep_id}})
-                    MERGE (source)-[:{edge["type"]}]->(keep)
+                    MERGE (source)-[r:{edge["type"]}]->(keep)
+                    SET r += $rel_props
                     """,
                     source_id=edge["source"],
                     keep_id=keep_id,
+                    rel_props=rel_props,
                 )
 
             for edge in outgoing:
+                rel_props = dict(edge.get("props") or {})
+                rel_props.pop("id", None)
+                rel_props.pop("created_at", None)
                 session.run(
                     f"""
                     MATCH (keep {{id: $keep_id}})
                     MATCH (target {{id: $target_id}})
-                    MERGE (keep)-[:{edge["type"]}]->(target)
+                    MERGE (keep)-[r:{edge["type"]}]->(target)
+                    SET r += $rel_props
                     """,
                     keep_id=keep_id,
                     target_id=edge["target"],
+                    rel_props=rel_props,
                 )
 
             session.run(
@@ -471,47 +431,53 @@ class Neo4jStorage:
         to_id: str,
         relation: str,
         properties: dict | None = None,
-        source: str | None = None,
+        source_note: str | None = None,
     ) -> dict:
-        """Create an edge between two nodes.
+        """Create or update an edge between two nodes (idempotent).
+
+        Uses MERGE on (from, to, relation_type) so duplicate calls
+        update instead of creating parallel edges.
 
         Args:
             from_id: Source node ID
             to_id: Target node ID
             relation: Relationship type (CONTRIBUTES_TO, MOTIVATES, etc.)
             properties: Additional edge properties (confidence, fact, etc.)
-            source: Provenance source ID (e.g., "file:/path/to/note.md")
+            source_note: Node ID of the note this edge was extracted from
 
         Returns:
             Dict with success status and edge details
         """
         props = properties.copy() if properties else {}
-        edge_id = f"edge:{uuid4().hex[:12]}"
-        props["id"] = edge_id
-        props["created_at"] = datetime.now().isoformat()
-        if source:
-            props["source"] = source
+        if source_note:
+            props["source_note"] = source_note
 
         sanitized_rel = self._sanitize_label(relation).upper()
+        now = datetime.now().isoformat()
 
         with self.driver.session() as session:
             result = session.run(
                 f"""
                 MATCH (a {{id: $from_id}})
                 MATCH (b {{id: $to_id}})
-                CREATE (a)-[r:{sanitized_rel} $props]->(b)
+                MERGE (a)-[r:{sanitized_rel}]->(b)
+                ON CREATE SET r.id = $edge_id, r.created_at = $now, r += $props
+                ON MATCH SET r += $props
                 RETURN r, a.name as from_name, b.name as to_name
                 """,
                 from_id=from_id,
                 to_id=to_id,
                 props=props,
+                edge_id=f"edge:{uuid4().hex[:12]}",
+                now=now,
             )
             record = result.single()
             if not record:
                 return {"success": False, "error": "One or both nodes not found"}
+            edge_props = dict(record["r"])
             return {
                 "success": True,
-                "edge_id": edge_id,
+                "edge_id": edge_props["id"],
                 "from_id": from_id,
                 "to_id": to_id,
                 "from_name": record["from_name"],
@@ -644,40 +610,44 @@ class Neo4jStorage:
             record = result.single()
             return dict(record["r"]) if record else None
 
-    def get_edges_by_source(
+    def get_edges_by_source_note(
         self,
         node_id: str,
-        source: str,
+        source_note: str,
+        relation: str | None = None,
         direction: str = "out",
     ) -> list[dict]:
-        """Get edges from a node filtered by provenance source.
+        """Get edges from a node filtered by source_note (provenance).
 
         Args:
             node_id: The node's unique identifier
-            source: Source ID to filter by (e.g., "file:/path/to/note.md")
+            source_note: Node ID of the originating note (e.g., "note:foo")
+            relation: Optional relation type filter (e.g., "WIKILINK")
             direction: "in", "out", or "both"
 
         Returns:
             List of edges with their properties and target info
         """
+        rel_filter = f":{self._sanitize_label(relation).upper()}" if relation else ""
+
         if direction == "out":
-            pattern = "(n)-[r]->(target)"
+            pattern = f"(n)-[r{rel_filter}]->(target)"
         elif direction == "in":
-            pattern = "(n)<-[r]-(target)"
+            pattern = f"(n)<-[r{rel_filter}]-(target)"
         else:
-            pattern = "(n)-[r]-(target)"
+            pattern = f"(n)-[r{rel_filter}]-(target)"
 
         with self.driver.session() as session:
             result = session.run(
                 f"""
                 MATCH (n {{id: $node_id}})
                 MATCH {pattern}
-                WHERE r.source = $source
+                WHERE r.source_note = $source_note
                 RETURN r, target.id as target_id, target.name as target_name,
                        type(r) as relation
                 """,
                 node_id=node_id,
-                source=source,
+                source_note=source_note,
             )
             return [
                 {
@@ -689,40 +659,44 @@ class Neo4jStorage:
                 for r in result
             ]
 
-    def delete_edges_by_source(
+    def delete_edges_by_source_note(
         self,
         node_id: str,
-        source: str,
+        source_note: str,
+        relation: str | None = None,
         direction: str = "out",
     ) -> int:
-        """Delete all edges from a node with a specific source.
+        """Delete edges from a node filtered by source_note.
 
         Args:
             node_id: The node's unique identifier
-            source: Source ID to filter by (e.g., "file:/path/to/note.md")
+            source_note: Node ID of the originating note (e.g., "note:foo")
+            relation: Optional relation type filter (e.g., "WIKILINK")
             direction: "in", "out", or "both"
 
         Returns:
             Number of edges deleted
         """
+        rel_filter = f":{self._sanitize_label(relation).upper()}" if relation else ""
+
         if direction == "out":
-            pattern = "(n)-[r]->()"
+            pattern = f"(n)-[r{rel_filter}]->()"
         elif direction == "in":
-            pattern = "(n)<-[r]-()"
+            pattern = f"(n)<-[r{rel_filter}]-()"
         else:
-            pattern = "(n)-[r]-()"
+            pattern = f"(n)-[r{rel_filter}]-()"
 
         with self.driver.session() as session:
             result = session.run(
                 f"""
                 MATCH (n {{id: $node_id}})
                 MATCH {pattern}
-                WHERE r.source = $source
+                WHERE r.source_note = $source_note
                 DELETE r
                 RETURN count(*) as deleted
                 """,
                 node_id=node_id,
-                source=source,
+                source_note=source_note,
             )
             record = result.single()
             return record["deleted"] if record else 0
@@ -812,96 +786,6 @@ class Neo4jStorage:
                 "node_names": record["node_names"],
                 "relations": record["relations"],
                 "length": record["path_length"],
-            }
-
-    def get_subgraph(self, node_id: str, depth: int = 2, max_nodes: int = 50) -> dict:
-        """Get a subgraph centered on a node.
-
-        Args:
-            node_id: Center node ID
-            depth: How many hops to traverse
-            max_nodes: Maximum nodes to return
-
-        Returns:
-            Dict with nodes and edges lists
-        """
-        with self.driver.session() as session:
-            result = session.run(
-                f"""
-                MATCH (center {{id: $id}})
-                CALL apoc.path.subgraphAll(center, {{
-                    maxLevel: {depth},
-                    limit: {max_nodes}
-                }})
-                YIELD nodes, relationships
-                RETURN nodes, relationships
-                """,
-                id=node_id,
-            )
-            record = result.single()
-            if not record:
-                return self._get_subgraph_simple(node_id, depth, max_nodes)
-
-            nodes = [
-                {"id": n["id"], "name": n.get("name"), "labels": list(n.labels)}
-                for n in record["nodes"]
-            ]
-            edges = [
-                {
-                    "from": r.start_node["id"],
-                    "to": r.end_node["id"],
-                    "type": r.type,
-                }
-                for r in record["relationships"]
-            ]
-            return {"nodes": nodes, "edges": edges}
-
-    def _get_subgraph_simple(
-        self, node_id: str, depth: int = 2, max_nodes: int = 50
-    ) -> dict:
-        """Get subgraph without APOC."""
-        with self.driver.session() as session:
-            nodes_result = session.run(
-                f"""
-                MATCH path = (center {{id: $id}})-[*0..{depth}]-(connected)
-                WITH DISTINCT connected
-                LIMIT {max_nodes}
-                RETURN collect({{
-                    id: connected.id,
-                    name: connected.name,
-                    labels: labels(connected)
-                }}) as nodes
-                """,
-                id=node_id,
-            )
-            nodes_record = nodes_result.single()
-            if not nodes_record or not nodes_record["nodes"]:
-                return {"nodes": [], "edges": []}
-
-            nodes = nodes_record["nodes"]
-            node_ids = [n["id"] for n in nodes if n["id"]]
-
-            if not node_ids:
-                return {"nodes": [], "edges": []}
-
-            edges_result = session.run(
-                """
-                MATCH (a)-[r]-(b)
-                WHERE a.id IN $node_ids AND b.id IN $node_ids
-                RETURN collect(DISTINCT {
-                    from_id: startNode(r).id,
-                    to_id: endNode(r).id,
-                    type: type(r)
-                }) as edges
-                """,
-                node_ids=node_ids,
-            )
-            edges_record = edges_result.single()
-            edges = edges_record["edges"] if edges_record else []
-
-            return {
-                "nodes": nodes,
-                "edges": [e for e in edges if e["from_id"]],
             }
 
     def get_stats(self) -> dict[str, Any]:

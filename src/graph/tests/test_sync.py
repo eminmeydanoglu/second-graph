@@ -73,7 +73,7 @@ And a link to [[New Concept]].
             storage.get_node.return_value = None
             storage.find_nodes.return_value = []
 
-        result = synchronizer.sync_note(note_path)
+        result = synchronizer.source_note(note_path)
 
         assert result["success"] is True
         assert result["action"] == "created"
@@ -103,7 +103,7 @@ Links: [[Person A]], [[Person B]]
 """
         )
 
-        synchronizer.sync_note(note_path)
+        synchronizer.source_note(note_path)
 
         note_path.write_text(
             """---
@@ -113,7 +113,7 @@ Links: [[Person A]], [[Person C]]
 """
         )
 
-        result = synchronizer.sync_note(note_path)
+        result = synchronizer.source_note(note_path)
 
         assert result["success"] is True
         assert result["action"] == "updated"
@@ -131,6 +131,6 @@ Links: [[Person A]], [[Person C]]
 
     def test_file_not_found(self, synchronizer):
         """Test error handling for missing file."""
-        result = synchronizer.sync_note("/non/existent/file.md")
+        result = synchronizer.source_note("/non/existent/file.md")
         assert result["success"] is False
         assert "File not found" in result["error"]

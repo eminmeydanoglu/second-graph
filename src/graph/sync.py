@@ -6,7 +6,7 @@ from typing import Any
 
 from ..parser.markdown import parse_note, ParsedNote
 from .neo4j_storage import Neo4jStorage
-from .schema import NodeType, EdgeType, generate_node_id, SourceType, generate_source_id
+from .schema import NodeType, EdgeType, generate_node_id
 from ..vector.store import VectorStore
 from ..vector.embedder import Embedder
 
@@ -38,9 +38,6 @@ class NoteSynchronizer:
     def source_note(self, file_path: str | Path) -> dict[str, Any]:
         """Source a single note file into the graph.
 
-        Parses the note, creates/updates nodes, and reconciles wikilink edges.
-        Only modifies edges with source="file:{path}", preserving agent edges.
-
         Args:
             file_path: Absolute path to the markdown file.
 
@@ -50,8 +47,6 @@ class NoteSynchronizer:
         path = Path(file_path)
         if not path.exists():
             return {"success": False, "error": f"File not found: {path}"}
-
-        source_id = generate_source_id(SourceType.FILE, str(path))
 
         try:
             note = parse_note(path)
@@ -76,7 +71,7 @@ class NoteSynchronizer:
             self.storage.add_node(node_type, node_id, note.title, props)
             action = "created"
 
-        edge_stats = self._sync_wikilinks(node_id, note.wikilinks, source_id)
+        edge_stats = self._sync_wikilinks(node_id, note.wikilinks)
 
         self.storage.update_node(node_id, {"tags": note.tags})
 
@@ -87,7 +82,7 @@ class NoteSynchronizer:
             "node_id": node_id,
             "action": action,
             "edges": edge_stats,
-            "source": source_id,
+            "source_note": node_id,
         }
 
     def _determine_node_type(self, note: ParsedNote) -> str:
@@ -96,18 +91,16 @@ class NoteSynchronizer:
             return note.frontmatter["type"]
         return NodeType.NOTE.value
 
-    def _sync_wikilinks(
-        self, source_id: str, wikilinks: list[str], file_source: str
-    ) -> dict:
-        """Diff and sync outgoing wikilinks with source awareness.
+    def _sync_wikilinks(self, node_id: str, wikilinks: list[str]) -> dict:
+        """Diff and sync outgoing wikilinks for a note.
 
-        Only modifies edges with source=file_source, preserving edges
-        created by agents or extraction.
+        Filters by relation=WIKILINK and source_note=node_id, so only
+        wikilink edges owned by this note are affected.
         """
         stats = {"added": 0, "removed": 0, "kept": 0}
 
-        current_edges = self.storage.get_edges_by_source(
-            source_id, source=file_source, direction="out"
+        current_edges = self.storage.get_edges_by_source_note(
+            node_id, source_note=node_id, relation="WIKILINK", direction="out"
         )
 
         current_targets: dict[str, str] = {}
@@ -142,7 +135,7 @@ class NoteSynchronizer:
                     )
 
             self.storage.add_edge(
-                source_id, target_id, EdgeType.WIKILINK.value, source=file_source
+                node_id, target_id, EdgeType.WIKILINK.value, source_note=node_id
             )
             stats["added"] += 1
 
