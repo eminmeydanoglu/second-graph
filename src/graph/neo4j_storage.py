@@ -213,6 +213,7 @@ class Neo4jStorage:
                 OPTIONAL MATCH (n)-[r]-(neighbor)
                 RETURN n, labels(n) as labels,
                        collect(DISTINCT {
+                           edge_id: r.id,
                            neighbor_id: neighbor.id,
                            neighbor_name: neighbor.name,
                            neighbor_labels: labels(neighbor),
@@ -462,7 +463,9 @@ class Neo4jStorage:
                 MATCH (b {{id: $to_id}})
                 MERGE (a)-[r:{sanitized_rel}]->(b)
                 ON CREATE SET r.id = $edge_id, r.created_at = $now, r += $props
-                ON MATCH SET r += $props
+                ON MATCH SET r.id = coalesce(r.id, $edge_id),
+                             r.created_at = coalesce(r.created_at, $now),
+                             r += $props
                 RETURN r, a.name as from_name, b.name as to_name
                 """,
                 from_id=from_id,
@@ -737,6 +740,7 @@ class Neo4jStorage:
                 MATCH (n {{id: $id}})
                 MATCH {pattern}
                 RETURN neighbor, labels(neighbor) as labels, type(r) as relation,
+                       r.id as edge_id,
                        CASE WHEN startNode(r) = n THEN 'out' ELSE 'in' END as direction
                 """,
                 id=node_id,
@@ -748,6 +752,7 @@ class Neo4jStorage:
                 neighbors.append(
                     {
                         "node": node_dict,
+                        "edge_id": r["edge_id"],
                         "relation": r["relation"],
                         "direction": r["direction"],
                     }

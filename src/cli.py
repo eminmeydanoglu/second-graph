@@ -292,6 +292,40 @@ def extraction_stats(extractions_path: Path):
         click.echo(f"  {rtype}: {count}")
 
 
+@cli.command("list-pending")
+@click.argument("vault_path", type=click.Path(exists=True, path_type=Path))
+@click.option("--db", "-d", type=click.Path(path_type=Path), default="data/vectors.db")
+@click.option(
+    "--format",
+    "-f",
+    type=click.Choice(["table", "paths"]),
+    default="table",
+    help="Output format: table (human) or paths (one per line, for piping)",
+)
+def list_pending(vault_path: Path, db: Path, format: str):
+    """List notes that need knowledge graph extraction."""
+    from .extraction.tracker import NoteTracker
+    from .vector.store import VectorStore
+
+    tracker = NoteTracker(VectorStore(str(db)))
+    result = tracker.list_pending_notes(str(vault_path))
+
+    if not result["success"]:
+        click.echo(f"Error: {result['error']}", err=True)
+        raise SystemExit(1)
+
+    if format == "paths":
+        for note in result["pending"]:
+            click.echo(note["path"])
+    else:
+        click.echo(
+            f"Pending: {result['pending_count']}  Unchanged: {result['unchanged_count']}"
+        )
+        for note in result["pending"]:
+            status = "NEW" if note["status"] == "new" else "CHG"
+            click.echo(f"  [{status}] {note['path']}")
+
+
 @cli.command("mcp-server")
 @click.option(
     "--neo4j-uri", default="bolt://localhost:7687", help="Neo4j connection URI"
