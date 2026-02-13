@@ -63,7 +63,7 @@ Link to [[Note B]].
 """
         )
 
-        result = synchronizer.source_note(note_a)
+        result = synchronizer.sync_note_from_file(note_a)
         assert result["success"]
         assert result["edges"]["added"] == 1
 
@@ -102,7 +102,7 @@ Now links to [[Note D]] instead.
 """
         )
 
-        result2 = synchronizer.source_note(note_a)
+        result2 = synchronizer.sync_note_from_file(note_a)
         assert result2["success"]
         assert result2["edges"]["removed"] == 1  # B removed
         assert result2["edges"]["added"] == 1  # D added
@@ -125,7 +125,7 @@ Now links to [[Note D]] instead.
         note = workspace / "Source Check.md"
         note.write_text("# Source Check\n\nContent.")
 
-        result = synchronizer.source_note(note)
+        result = synchronizer.sync_note_from_file(note)
 
         assert "source_note" in result
         assert result["source_note"].startswith("note:")
@@ -137,7 +137,7 @@ Now links to [[Note D]] instead.
         note_a = workspace / "Note A.md"
         note_a.write_text("# Note A\n\n[[Shared Target]]")
 
-        result_a = synchronizer.source_note(note_a)
+        result_a = synchronizer.sync_note_from_file(note_a)
         node_a_id = result_a["node_id"]
 
         # Manually add a WIKILINK from note_a's target with a different source_note
@@ -151,7 +151,7 @@ Now links to [[Note D]] instead.
 
         # Re-sync note A — should not touch the reverse wikilink
         note_a.write_text("# Note A\n\n[[Different Target]]")
-        result_a2 = synchronizer.source_note(note_a)
+        result_a2 = synchronizer.sync_note_from_file(note_a)
 
         # The reverse wikilink (owned by target) should survive
         reverse_edges = storage.get_edges_by_source_note(
@@ -168,7 +168,7 @@ Now links to [[Note D]] instead.
         note = workspace / "Main.md"
         note.write_text("# Main\n\n[[Shared Name]]")
 
-        result = synchronizer.source_note(note)
+        result = synchronizer.sync_note_from_file(note)
         assert result["success"]
 
         neighbors = storage.get_neighbors(result["node_id"], direction="out")

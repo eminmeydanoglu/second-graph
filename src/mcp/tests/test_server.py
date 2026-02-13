@@ -256,7 +256,7 @@ class TestSyncNoteToolIntegration:
             pytest.skip(f"Neo4j not available: {e}")
 
     def test_source_note_integration(self, init_server, tmp_path):
-        """Test source_note with real storage."""
+        """Test source_note (alias) with real storage."""
         note = tmp_path / "Integration Test.md"
         note.write_text(
             """---
@@ -268,6 +268,7 @@ Links to [[Target Note]].
 """
         )
 
+        # source_note alias
         result = mcp_server.source_note(str(note))
 
         assert result["success"] is True
@@ -275,3 +276,13 @@ Links to [[Target Note]].
         assert result["edges"]["added"] == 1
         assert "source_note" in result
         assert result["source_note"].startswith("note:")
+
+    def test_sync_note_integration(self, init_server, tmp_path):
+        """Test sync_note (main function) with real storage."""
+        note = tmp_path / "Sync Test.md"
+        note.write_text("# Sync Test")
+
+        result = mcp_server.sync_note(str(note))
+
+        assert result["success"] is True
+        assert result["action"] == "created"

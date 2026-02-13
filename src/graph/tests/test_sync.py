@@ -68,12 +68,13 @@ And a link to [[New Concept]].
             storage.get_node.return_value = None
             storage.find_nodes.return_value = []
 
-        result = synchronizer.source_note(note_path)
+        result = synchronizer.sync_note_from_file(note_path)
 
         assert result["success"] is True
         assert result["action"] == "created"
         assert result["node_id"] == "concept:new_idea"
         assert result["edges"]["added"] == 2  # Two wikilinks
+        # Tag sync now handled as graph edges
 
         if isinstance(storage, Neo4jStorage):
             node = storage.get_node("concept:new_idea")
@@ -82,10 +83,10 @@ And a link to [[New Concept]].
             assert "idea" in node["node"]["tags"]
 
             neighbors = storage.get_neighbors("concept:new_idea", direction="out")
-            assert len(neighbors) == 2
             names = {n["node"]["name"] for n in neighbors}
             assert "Existing Concept" in names
             assert "New Concept" in names
+            assert "idea" in names  # Tag node connected
 
     def test_sync_update_note(self, synchronizer, workspace, storage):
         """Test updating a note updates edges."""
@@ -98,7 +99,7 @@ Links: [[Person A]], [[Person B]]
 """
         )
 
-        synchronizer.source_note(note_path)
+        synchronizer.sync_note_from_file(note_path)
 
         note_path.write_text(
             """---
@@ -108,7 +109,7 @@ Links: [[Person A]], [[Person C]]
 """
         )
 
-        result = synchronizer.source_note(note_path)
+        result = synchronizer.sync_note_from_file(note_path)
 
         assert result["success"] is True
         assert result["action"] == "updated"
@@ -126,7 +127,7 @@ Links: [[Person A]], [[Person C]]
 
     def test_file_not_found(self, synchronizer):
         """Test error handling for missing file."""
-        result = synchronizer.source_note("/non/existent/file.md")
+        result = synchronizer.sync_note_from_file("/non/existent/file.md")
         assert result["success"] is False
         assert "File not found" in result["error"]
 
@@ -141,7 +142,7 @@ type: note
 """
         )
 
-        result = synchronizer.source_note(note_path)
+        result = synchronizer.sync_note_from_file(note_path)
 
         assert result["success"] is True
         assert result["node_id"].startswith("note:")

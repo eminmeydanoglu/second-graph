@@ -462,12 +462,11 @@ def _require_synchronizer() -> NoteSynchronizer:
 
 
 @mcp.tool()
-def source_note(path: str) -> dict:
-    """Source a markdown note file into the knowledge graph.
+def sync_note(path: str) -> dict:
+    """Sync a markdown note file into the knowledge graph.
 
-    Parses the note, creates/updates nodes, and reconciles wikilink edges.
-    Only modifies WIKILINK edges with source_note=node_id for this note,
-    preserving edges from other notes or other relation types.
+    Parses the note, creates/updates nodes, reconciles wikilink edges,
+    syncs tags, and updates vector embeddings.
 
     Args:
         path: Absolute path to the markdown file
@@ -476,7 +475,14 @@ def source_note(path: str) -> dict:
         Dict with sync results (node_id, action, edges changed, source_note)
     """
     sync = _require_synchronizer()
-    return sync.source_note(path)
+    return _strip_internal_dict(sync.sync_note_from_file(path))
+
+
+# Alias for backward compatibility
+@mcp.tool()
+def source_note(path: str) -> dict:
+    """Alias for sync_note. Use sync_note instead."""
+    return sync_note(path)
 
 
 def _require_tracker() -> NoteTracker:
