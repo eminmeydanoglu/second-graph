@@ -158,3 +158,21 @@ Now links to [[Note D]] instead.
             target_id, target_id, relation="WIKILINK"
         )
         assert len(reverse_edges) == 1
+
+    def test_wikilink_uses_note_identity_not_other_type(
+        self, synchronizer, workspace, storage
+    ):
+        """Wikilinks should resolve to Note identity, not first same-name non-note node."""
+        storage.add_node("Concept", "concept:shared_name", "Shared Name", {})
+
+        note = workspace / "Main.md"
+        note.write_text("# Main\n\n[[Shared Name]]")
+
+        result = synchronizer.source_note(note)
+        assert result["success"]
+
+        neighbors = storage.get_neighbors(result["node_id"], direction="out")
+        target_ids = {n["node"]["id"] for n in neighbors}
+
+        assert "note:shared_name" in target_ids
+        assert "concept:shared_name" not in target_ids

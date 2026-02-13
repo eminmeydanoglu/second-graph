@@ -95,6 +95,113 @@ class TestStrictValidation:
 
         assert result["success"] is True
 
+    def test_add_edge_uses_canonical_type_from_multiple_labels(self, monkeypatch):
+        """Validation should use canonical type even with extra labels present."""
+
+        class _MultiLabelStorage(_FakeStorage):
+            def get_node(self, node_id: str) -> dict | None:
+                if node_id.startswith("person:"):
+                    return {
+                        "node": {
+                            "_labels": ["Entity", "Person"],
+                            "id": node_id,
+                            "name": "P",
+                        },
+                        "connections": [],
+                    }
+                if node_id.startswith("goal:"):
+                    return {
+                        "node": {
+                            "_labels": ["Entity", "Goal"],
+                            "id": node_id,
+                            "name": "G",
+                        },
+                        "connections": [],
+                    }
+                return None
+
+        monkeypatch.setattr(mcp_server, "storage", _MultiLabelStorage())
+
+        result = mcp_server.add_edge("person:x", "goal:y", "HAS_GOAL")
+        assert result["success"] is True
+
+
+class _FakeEmbedder:
+    def embed(self, text: str) -> list[float]:
+        return [0.1] * 384
+
+
+class _LeakyStorage:
+    """Storage stub that intentionally leaks internal vector fields."""
+
+    def get_node(self, node_id: str) -> dict | None:
+        return {
+            "node": {
+                "id": node_id,
+                "name": "Leaky",
+                "embedding": [0.1, 0.2],
+                "_labels": ["Goal", "Entity"],
+            },
+            "connections": [
+                {
+                    "neighbor_id": "goal:n2",
+                    "neighbor_name": "N2",
+                    "neighbor_labels": ["Goal", "Entity"],
+                }
+            ],
+        }
+
+    def search_similar(self, query_embedding, node_types=None, limit: int = 10):
+        return [
+            {
+                "node_id": "goal:leak",
+                "node_type": "Goal",
+                "name": "Leaky Result",
+                "summary": "s",
+                "embedding": [0.1, 0.2],
+                "score": 0.99,
+            }
+        ]
+
+    def get_stats(self):
+        return {
+            "nodes": 1,
+            "relationships": 0,
+            "by_label": {"Entity": 5, "Goal": 1},
+        }
+
+
+class TestPrivacyFiltering:
+    """Ensure MCP never exposes internal embedding details."""
+
+    def test_get_node_strips_embedding_and_entity_label(self, monkeypatch):
+        monkeypatch.setattr(mcp_server, "storage", _LeakyStorage())
+
+        result = mcp_server.get_node("goal:leak")
+
+        assert result["success"] is True
+        assert "embedding" not in result["node"]
+        assert "Entity" not in result["node"].get("_labels", [])
+        assert "Entity" not in result["connections"][0]["neighbor_labels"]
+
+    def test_search_entities_strips_embedding(self, monkeypatch):
+        monkeypatch.setattr(mcp_server, "storage", _LeakyStorage())
+        monkeypatch.setattr(mcp_server, "embedder", _FakeEmbedder())
+
+        result = mcp_server.search_entities("test")
+
+        assert result["success"] is True
+        assert result["count"] == 1
+        assert "embedding" not in result["entities"][0]
+
+    def test_get_stats_strips_entity_label(self, monkeypatch):
+        monkeypatch.setattr(mcp_server, "storage", _LeakyStorage())
+
+        result = mcp_server.get_stats()
+
+        assert result["success"] is True
+        assert "Entity" not in result["by_label"]
+
 
 class TestCLIEntrypoint:
     """Tests for CLI entrypoint."""

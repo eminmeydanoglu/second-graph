@@ -4,6 +4,8 @@ Exposes knowledge graph CRUD operations as MCP tools.
 Used by the Graph Agent (subagent) for runtime memory manipulation.
 """
 
+from typing import Any
+
 from mcp.server.fastmcp import FastMCP
 
 from ..graph.neo4j_storage import Neo4jStorage
@@ -73,6 +75,44 @@ def _require_embedder() -> Embedder:
     return embedder
 
 
+def _strip_internal_fields(data: Any) -> Any:
+    """Recursively remove internal vector fields from MCP responses."""
+    if isinstance(data, dict):
+        cleaned = {}
+        for key, value in data.items():
+            if key == "embedding":
+                continue
+            if key in {"_labels", "neighbor_labels"} and isinstance(value, list):
+                cleaned[key] = [label for label in value if label != "Entity"]
+                continue
+            if key == "by_label" and isinstance(value, dict):
+                cleaned[key] = {
+                    k: _strip_internal_fields(v)
+                    for k, v in value.items()
+                    if k != "Entity"
+                }
+                continue
+            cleaned[key] = _strip_internal_fields(value)
+        return cleaned
+    if isinstance(data, list):
+        return [_strip_internal_fields(item) for item in data]
+    return data
+
+
+def _strip_internal_dict(data: dict) -> dict:
+    """Typed wrapper for dict responses."""
+    return _strip_internal_fields(data)
+
+
+def _canonical_node_type_from_labels(labels: list[str]) -> str:
+    """Pick canonical schema type from labels deterministically."""
+    valid_types = get_node_types()
+    for node_type in valid_types:
+        if node_type in labels:
+            return node_type
+    return "Unknown"
+
+
 @mcp.tool()
 def add_node(
     node_type: str,
@@ -114,7 +154,7 @@ def add_node(
         embedding = emb.embed(f"{name}: {summary}")
         db.set_embedding(node_id, embedding)
 
-    return {"success": True, "node_id": node_id, "node": result}
+    return _strip_internal_dict({"success": True, "node_id": node_id, "node": result})
 
 
 @mcp.tool()
@@ -131,7 +171,7 @@ def get_node(node_id: str) -> dict:
     result = db.get_node(node_id)
     if not result:
         return {"success": False, "error": f"Node not found: {node_id}"}
-    return {"success": True, **result}
+    return _strip_internal_dict({"success": True, **result})
 
 
 @mcp.tool()
@@ -152,7 +192,9 @@ def find_node(
     """
     db = _require_storage()
     results = db.find_nodes(name, node_type, match_type)
-    return {"success": True, "count": len(results), "nodes": results}
+    return _strip_internal_dict(
+        {"success": True, "count": len(results), "nodes": results}
+    )
 
 
 @mcp.tool()
@@ -180,7 +222,7 @@ def update_node(node_id: str, properties: dict) -> dict:
             embedding = emb.embed(f"{name}: {summary}")
             db.set_embedding(node_id, embedding)
 
-    return {"success": True, "node": result}
+    return _strip_internal_dict({"success": True, "node": result})
 
 
 @mcp.tool()
@@ -247,8 +289,12 @@ def add_edge(
     if not target_node:
         return {"success": False, "error": f"Target node not found: {to_id}"}
 
-    source_type = source_node["node"].get("_labels", ["Unknown"])[0]
-    target_type = target_node["node"].get("_labels", ["Unknown"])[0]
+    source_type = _canonical_node_type_from_labels(
+        source_node["node"].get("_labels", [])
+    )
+    target_type = _canonical_node_type_from_labels(
+        target_node["node"].get("_labels", [])
+    )
 
     validation = validate_edge(source_type, target_type, relation, strict=True)
     if not validation.valid:
@@ -330,7 +376,9 @@ def get_neighbors(
     """
     db = _require_storage()
     results = db.get_neighbors(node_id, direction, edge_types)
-    return {"success": True, "count": len(results), "neighbors": results}
+    return _strip_internal_dict(
+        {"success": True, "count": len(results), "neighbors": results}
+    )
 
 
 @mcp.tool()
@@ -375,7 +423,9 @@ def search_entities(
 
     query_embedding = emb.embed(query)
     results = db.search_similar(query_embedding, node_types, limit)
-    return {"success": True, "count": len(results), "entities": results}
+    return _strip_internal_dict(
+        {"success": True, "count": len(results), "entities": results}
+    )
 
 
 @mcp.tool()
@@ -401,7 +451,7 @@ def get_stats() -> dict:
     """
     db = _require_storage()
     stats = db.get_stats()
-    return {"success": True, **stats}
+    return _strip_internal_dict({"success": True, **stats})
 
 
 def _require_synchronizer() -> NoteSynchronizer:

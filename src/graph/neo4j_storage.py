@@ -873,8 +873,20 @@ class Neo4jStorage:
     # =========================================================================
 
     def ensure_vector_index(self):
-        """Create vector index if it doesn't exist. Safe to call multiple times."""
+        """Create vector index if it doesn't exist and verify availability."""
         self._create_indexes()
+        with self.driver.session() as session:
+            record = session.run(
+                """
+                SHOW INDEXES YIELD name, type, state
+                WHERE name = 'entity_embeddings'
+                RETURN type, state
+                """
+            ).single()
+            if not record or record["type"] != "VECTOR":
+                raise RuntimeError(
+                    "Neo4j vector index 'entity_embeddings' is not available"
+                )
 
     def set_embedding(self, node_id: str, embedding: list[float]) -> bool:
         """Store embedding on a node and add Entity label for vector indexing.
@@ -886,6 +898,11 @@ class Neo4jStorage:
         Returns:
             True if node found and embedding set, False otherwise
         """
+        if len(embedding) != self.embedding_dimensions:
+            raise ValueError(
+                f"Embedding dimension mismatch: expected {self.embedding_dimensions}, got {len(embedding)}"
+            )
+
         with self.driver.session() as session:
             result = session.run(
                 """
@@ -915,6 +932,12 @@ class Neo4jStorage:
             List of dicts with node_id, node_type, name, summary, score.
             Embedding is never included.
         """
+        if len(query_embedding) != self.embedding_dimensions:
+            raise ValueError(
+                f"Query embedding dimension mismatch: expected {self.embedding_dimensions}, got {len(query_embedding)}"
+            )
+        limit = max(1, limit)
+
         with self.driver.session() as session:
             result = session.run(
                 """

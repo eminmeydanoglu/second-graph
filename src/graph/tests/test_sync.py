@@ -129,3 +129,24 @@ Links: [[Person A]], [[Person C]]
         result = synchronizer.source_note("/non/existent/file.md")
         assert result["success"] is False
         assert "File not found" in result["error"]
+
+    def test_frontmatter_type_is_normalized(self, synchronizer, workspace, storage):
+        """Lower/upper case frontmatter types normalize to canonical schema type."""
+        note_path = workspace / "Case Type.md"
+        note_path.write_text(
+            """---
+type: note
+---
+# Case Type
+"""
+        )
+
+        result = synchronizer.source_note(note_path)
+
+        assert result["success"] is True
+        assert result["node_id"].startswith("note:")
+
+        if isinstance(storage, Neo4jStorage):
+            node = storage.get_node(result["node_id"])
+            assert node is not None
+            assert "Note" in node["node"].get("_labels", [])

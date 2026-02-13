@@ -549,3 +549,30 @@ class TestNeo4jVectorSearch:
 
         stats = storage.get_stats()
         assert "Entity" not in stats.get("by_label", {})
+
+    def test_set_embedding_dimension_mismatch_raises(self, storage):
+        """set_embedding should reject vectors with wrong dimensions."""
+        storage.add_node("Goal", "goal:dim_mismatch", "Dim Mismatch", {})
+        with pytest.raises(ValueError):
+            storage.set_embedding("goal:dim_mismatch", [0.1] * 10)
+
+    def test_search_dimension_mismatch_raises(self, storage):
+        """search_similar should reject query vectors with wrong dimensions."""
+        with pytest.raises(ValueError):
+            storage.search_similar([0.1] * 10, limit=5)
+
+    def test_vector_index_exists_after_ensure(self, storage):
+        """ensure_vector_index should leave the expected index available."""
+        storage.ensure_vector_index()
+
+        with storage.driver.session() as session:
+            record = session.run(
+                """
+                SHOW INDEXES YIELD name, type
+                WHERE name = 'entity_embeddings'
+                RETURN type
+                """
+            ).single()
+
+        assert record is not None
+        assert record["type"] == "VECTOR"

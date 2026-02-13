@@ -83,9 +83,12 @@ class NoteSynchronizer:
         }
 
     def _determine_node_type(self, note: ParsedNote) -> str:
-        """Determine node type from frontmatter or default to Note."""
+        """Determine canonical node type from frontmatter or default to Note."""
         if "type" in note.frontmatter:
-            return note.frontmatter["type"]
+            raw_type = str(note.frontmatter["type"])
+            for node_type in NodeType:
+                if node_type.value.lower() == raw_type.lower():
+                    return node_type.value
         return NodeType.NOTE.value
 
     def _sync_wikilinks(self, node_id: str, wikilinks: list[str]) -> dict:
@@ -120,13 +123,18 @@ class NoteSynchronizer:
             stats["removed"] += 1
 
         for target_name in to_add:
-            matches = self.storage.find_nodes(target_name, match_type="exact")
-            if matches:
-                target_id = matches[0]["id"]
-            else:
-                target_type = NodeType.NOTE.value
-                target_id = generate_node_id(target_type, target_name)
-                if not self.storage.get_node(target_id):
+            target_type = NodeType.NOTE.value
+            target_id = generate_node_id(target_type, target_name)
+
+            if not self.storage.get_node(target_id):
+                matches = self.storage.find_nodes(
+                    target_name,
+                    node_type=NodeType.NOTE.value,
+                    match_type="exact",
+                )
+                if matches:
+                    target_id = matches[0]["id"]
+                else:
                     self.storage.add_node(
                         target_type, target_id, target_name, {"placeholder": True}
                     )
