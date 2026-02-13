@@ -1,6 +1,7 @@
 """CLI for obsidian-brain."""
 
 from pathlib import Path
+import subprocess
 
 import click
 
@@ -113,21 +114,28 @@ def neo4j_import(graph_path: Path, uri: str, user: str, password: str, clear: bo
 
     click.echo(f"Connecting to Neo4j: {uri}")
     storage = Neo4jStorage(uri=uri, user=user, password=password)
+    try:
+        if clear:
+            typed = click.prompt(
+                "This will DELETE ALL graph data. Type CLEAR to continue", default=""
+            )
+            if typed != "CLEAR":
+                click.echo("Aborted clear.")
+                raise SystemExit(1)
+            click.echo("Clearing existing data...")
+            storage.clear(force=True)
 
-    if clear:
-        click.echo("Clearing existing data...")
-        storage.clear()
+        click.echo("Importing nodes and relationships...")
+        stats = storage.import_vault_graph(graph)
+        click.echo(
+            f"Imported: {stats['nodes']} nodes, {stats['relationships']} relationships"
+        )
 
-    click.echo("Importing nodes and relationships...")
-    stats = storage.import_vault_graph(graph)
-    click.echo(
-        f"Imported: {stats['nodes']} nodes, {stats['relationships']} relationships"
-    )
+        db_stats = storage.get_stats()
+        click.echo(f"Database stats: {db_stats}")
+    finally:
+        storage.close()
 
-    db_stats = storage.get_stats()
-    click.echo(f"Database stats: {db_stats}")
-
-    storage.close()
     click.echo("\nNeo4j Browser: http://localhost:7474")
     click.echo("Login: neo4j / obsidian")
 
@@ -324,6 +332,206 @@ def list_pending(vault_path: Path, db: Path, format: str):
         for note in result["pending"]:
             status = "NEW" if note["status"] == "new" else "CHG"
             click.echo(f"  [{status}] {note['path']}")
+
+
+@cli.command("graph-snapshot")
+@click.option(
+    "--neo4j-uri", default="bolt://localhost:7687", help="Neo4j connection URI"
+)
+@click.option("--neo4j-user", default="neo4j", help="Neo4j username")
+@click.option("--neo4j-password", default="obsidian", help="Neo4j password")
+@click.option(
+    "--history-dir",
+    type=click.Path(path_type=Path),
+    default="data/graph-history",
+    help="Directory where graph snapshots are stored",
+)
+@click.option("--message", "-m", default="", help="Snapshot message")
+@click.option(
+    "--git-commit",
+    is_flag=True,
+    help="Also commit snapshot files with git",
+)
+def graph_snapshot(
+    neo4j_uri: str,
+    neo4j_user: str,
+    neo4j_password: str,
+    history_dir: Path,
+    message: str,
+    git_commit: bool,
+):
+    """Create a versioned snapshot of the live Neo4j graph."""
+    from .graph.history import SnapshotRepository
+    from .graph.neo4j_storage import Neo4jStorage
+
+    storage = Neo4jStorage(uri=neo4j_uri, user=neo4j_user, password=neo4j_password)
+    try:
+        payload = storage.export_snapshot()
+    finally:
+        storage.close()
+
+    repo = SnapshotRepository(history_dir)
+    meta = repo.create(payload, message=message)
+
+    click.echo(f"Snapshot: {meta.snapshot_id}")
+    click.echo(f"Nodes: {meta.nodes}  Edges: {meta.edges}")
+    click.echo(f"File: {meta.file}")
+
+    if git_commit:
+        root_ok = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            capture_output=True,
+            text=True,
+        )
+        if root_ok.returncode != 0:
+            click.echo("Not a git repository, skipped git commit.")
+            return
+
+        subprocess.run(["git", "add", str(history_dir)], check=True)
+        msg = f"graph snapshot {meta.snapshot_id}"
+        if message:
+            msg += f" - {message}"
+        commit = subprocess.run(
+            ["git", "commit", "-m", msg], capture_output=True, text=True
+        )
+        if commit.returncode == 0:
+            click.echo("Snapshot committed to git.")
+        else:
+            stderr = (commit.stderr or "").strip()
+            if "nothing to commit" in stderr.lower():
+                click.echo("No changes to commit.")
+            else:
+                raise SystemExit(f"Git commit failed: {stderr or 'unknown error'}")
+
+
+@cli.command("graph-log")
+@click.option(
+    "--history-dir",
+    type=click.Path(path_type=Path),
+    default="data/graph-history",
+    help="Directory where graph snapshots are stored",
+)
+@click.option("--limit", type=int, default=20, help="How many snapshots to show")
+def graph_log(history_dir: Path, limit: int):
+    """Show snapshot history (git log equivalent for graph state)."""
+    from .graph.history import SnapshotRepository
+
+    repo = SnapshotRepository(history_dir)
+    rows = repo.list(limit=limit)
+    if not rows:
+        click.echo("No snapshots yet.")
+        return
+
+    for row in rows:
+        message = row.message or "(no message)"
+        click.echo(f"{row.snapshot_id}  nodes={row.nodes} edges={row.edges}  {message}")
+
+
+@cli.command("graph-diff")
+@click.argument("old_ref", type=str)
+@click.argument("new_ref", type=str)
+@click.option(
+    "--history-dir",
+    type=click.Path(path_type=Path),
+    default="data/graph-history",
+    help="Directory where graph snapshots are stored",
+)
+def graph_diff(old_ref: str, new_ref: str, history_dir: Path):
+    """Diff two graph snapshots."""
+    from .graph.history import SnapshotRepository, diff_snapshots
+
+    repo = SnapshotRepository(history_dir)
+    try:
+        old_snapshot = repo.load(old_ref)
+        new_snapshot = repo.load(new_ref)
+    except (FileNotFoundError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+    diff = diff_snapshots(old_snapshot, new_snapshot)
+
+    summary = diff["summary"]
+    click.echo(
+        " ".join(
+            [
+                f"added_nodes={summary['added_nodes']}",
+                f"removed_nodes={summary['removed_nodes']}",
+                f"updated_nodes={summary['updated_nodes']}",
+                f"added_edges={summary['added_edges']}",
+                f"removed_edges={summary['removed_edges']}",
+                f"updated_edges={summary['updated_edges']}",
+            ]
+        )
+    )
+
+
+@cli.command("graph-restore")
+@click.argument("snapshot_ref", type=str)
+@click.option(
+    "--neo4j-uri", default="bolt://localhost:7687", help="Neo4j connection URI"
+)
+@click.option("--neo4j-user", default="neo4j", help="Neo4j username")
+@click.option("--neo4j-password", default="obsidian", help="Neo4j password")
+@click.option(
+    "--history-dir",
+    type=click.Path(path_type=Path),
+    default="data/graph-history",
+    help="Directory where graph snapshots are stored",
+)
+@click.option(
+    "--apply",
+    is_flag=True,
+    help="Actually restore. Without this flag, only show what would happen.",
+)
+@click.option(
+    "--clear-first/--no-clear-first",
+    default=True,
+    help="Clear current graph before import",
+)
+def graph_restore(
+    snapshot_ref: str,
+    neo4j_uri: str,
+    neo4j_user: str,
+    neo4j_password: str,
+    history_dir: Path,
+    apply: bool,
+    clear_first: bool,
+):
+    """Restore graph state from a snapshot."""
+    from .graph.history import SnapshotRepository
+    from .graph.neo4j_storage import Neo4jStorage
+
+    repo = SnapshotRepository(history_dir)
+    try:
+        snapshot = repo.load(snapshot_ref)
+    except (FileNotFoundError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+
+    node_count = len(snapshot.get("nodes", []))
+    edge_count = len(snapshot.get("edges", []))
+    click.echo(f"Snapshot {snapshot_ref}: nodes={node_count} edges={edge_count}")
+
+    if not apply:
+        click.echo("Dry run only. Re-run with --apply to restore.")
+        return
+
+    if clear_first:
+        typed = click.prompt(
+            "This will DELETE ALL current graph data. Type RESTORE to continue",
+            default="",
+        )
+        if typed != "RESTORE":
+            click.echo("Aborted restore.")
+            raise SystemExit(1)
+
+    storage = Neo4jStorage(uri=neo4j_uri, user=neo4j_user, password=neo4j_password)
+    try:
+        result = storage.import_snapshot(snapshot, clear_first=clear_first)
+        stats = storage.get_stats()
+    finally:
+        storage.close()
+
+    click.echo(
+        f"Restored nodes={result['nodes']} edges={result['edges']} -> db nodes={stats['nodes']} rels={stats['relationships']}"
+    )
 
 
 @cli.command("mcp-server")

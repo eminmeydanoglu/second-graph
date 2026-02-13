@@ -3,7 +3,9 @@
 Provides both initial vault import and runtime CRUD for the knowledge graph.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
+import hashlib
+import json
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -27,8 +29,14 @@ class Neo4jStorage:
     def close(self):
         self.driver.close()
 
-    def clear(self):
-        """Clear all nodes and relationships."""
+    def clear(self, force: bool = False):
+        """Clear all nodes and relationships.
+
+        Args:
+            force: Must be True to execute destructive wipe.
+        """
+        if not force:
+            raise RuntimeError("Refusing to clear database without force=True")
         with self.driver.session() as session:
             session.run("MATCH (n) DETACH DELETE n")
 
@@ -817,3 +825,214 @@ class Neo4jStorage:
                 "relationships": rel_count,
                 "by_label": label_counts,
             }
+
+    def _serialize_value(self, value: Any) -> Any:
+        """Convert Neo4j values into JSON-serializable values."""
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        if isinstance(value, list):
+            return [self._serialize_value(v) for v in value]
+        if isinstance(value, dict):
+            return {k: self._serialize_value(v) for k, v in value.items()}
+        return str(value)
+
+    def export_snapshot(self) -> dict[str, Any]:
+        """Export full graph as a JSON-serializable snapshot payload."""
+        with self.driver.session() as session:
+            node_rows = session.run(
+                """
+                MATCH (n)
+                RETURN n, labels(n) as labels
+                ORDER BY n.id
+                """
+            )
+
+            nodes = []
+            for row in node_rows:
+                props = self._serialize_value(dict(row["n"]))
+                node_id = props.get("id")
+                if not node_id:
+                    continue
+                nodes.append(
+                    {
+                        "id": node_id,
+                        "labels": sorted(row["labels"]),
+                        "properties": props,
+                    }
+                )
+
+            edge_rows = session.run(
+                """
+                MATCH (a)-[r]->(b)
+                RETURN a.id as from_id, b.id as to_id, type(r) as relation, properties(r) as props
+                ORDER BY from_id, relation, to_id, coalesce(props.id, '')
+                """
+            )
+
+            edges = []
+            for row in edge_rows:
+                props = self._serialize_value(dict(row["props"]))
+                if not props.get("id"):
+                    edge_basis = {
+                        "from_id": row["from_id"],
+                        "to_id": row["to_id"],
+                        "relation": row["relation"],
+                        "properties": props,
+                    }
+                    digest = hashlib.sha256(
+                        json.dumps(
+                            edge_basis, sort_keys=True, separators=(",", ":")
+                        ).encode("utf-8")
+                    ).hexdigest()[:24]
+                    props["id"] = f"edge:snap_{digest}"
+
+                edges.append(
+                    {
+                        "from_id": row["from_id"],
+                        "to_id": row["to_id"],
+                        "relation": row["relation"],
+                        "properties": props,
+                    }
+                )
+
+        return {
+            "exported_at": datetime.now(timezone.utc).isoformat(),
+            "stats": {"nodes": len(nodes), "edges": len(edges)},
+            "nodes": nodes,
+            "edges": edges,
+        }
+
+    def import_snapshot(
+        self, snapshot: dict[str, Any], clear_first: bool = False
+    ) -> dict[str, int]:
+        """Import a snapshot payload back into Neo4j."""
+        nodes = snapshot.get("nodes", [])
+        edges = snapshot.get("edges", [])
+
+        def _import_tx(tx) -> dict[str, int]:
+            node_count = 0
+            edge_count = 0
+
+            if clear_first:
+                tx.run("MATCH (n) DETACH DELETE n")
+
+            for node in nodes:
+                props = dict(node.get("properties", {}))
+                node_id = props.get("id") or node.get("id")
+                if not node_id:
+                    continue
+
+                labels = node.get("labels") or ["Concept"]
+                sanitized_labels = [
+                    self._sanitize_label(label) for label in labels if label
+                ]
+                if not sanitized_labels:
+                    sanitized_labels = ["Concept"]
+                label_spec = ":".join(dict.fromkeys(sanitized_labels))
+
+                if not props.get("name"):
+                    props["name"] = props.get("title", node_id)
+                props["id"] = node_id
+
+                tx.run(
+                    """
+                    MERGE (n {id: $node_id})
+                    SET n += $props
+                    """,
+                    node_id=node_id,
+                    props=props,
+                )
+                tx.run(
+                    f"""
+                    MATCH (n {{id: $node_id}})
+                    SET n:{label_spec}
+                    """,
+                    node_id=node_id,
+                )
+                node_count += 1
+
+            for edge in edges:
+                from_id = edge.get("from_id")
+                to_id = edge.get("to_id")
+                relation = edge.get("relation")
+                if not from_id or not to_id or not relation:
+                    continue
+
+                rel = self._sanitize_label(relation).upper()
+                props = dict(edge.get("properties", {}))
+                edge_id = props.get("id")
+
+                if edge_id:
+                    existing_edge = tx.run(
+                        """
+                        MATCH (x)-[r {id: $edge_id}]->(y)
+                        RETURN x.id as from_id, y.id as to_id, type(r) as relation
+                        LIMIT 1
+                        """,
+                        edge_id=edge_id,
+                    ).single()
+                    if existing_edge and (
+                        existing_edge["from_id"] != from_id
+                        or existing_edge["to_id"] != to_id
+                        or existing_edge["relation"] != rel
+                    ):
+                        raise ValueError(
+                            f"Edge id collision for {edge_id}: "
+                            f"existing {existing_edge['from_id']}-[{existing_edge['relation']}]->{existing_edge['to_id']} "
+                            f"vs snapshot {from_id}-[{rel}]->{to_id}"
+                        )
+
+                    result = tx.run(
+                        f"""
+                        MATCH (a {{id: $from_id}})
+                        MATCH (b {{id: $to_id}})
+                        MERGE (a)-[r:{rel} {{id: $edge_id}}]->(b)
+                        SET r += $props
+                        RETURN count(r) as written
+                        """,
+                        from_id=from_id,
+                        to_id=to_id,
+                        edge_id=edge_id,
+                        props=props,
+                    )
+                else:
+                    if clear_first:
+                        result = tx.run(
+                            f"""
+                            MATCH (a {{id: $from_id}})
+                            MATCH (b {{id: $to_id}})
+                            CREATE (a)-[r:{rel}]->(b)
+                            SET r += $props
+                            RETURN count(r) as written
+                            """,
+                            from_id=from_id,
+                            to_id=to_id,
+                            props=props,
+                        )
+                    else:
+                        result = tx.run(
+                            f"""
+                            MATCH (a {{id: $from_id}})
+                            MATCH (b {{id: $to_id}})
+                            MERGE (a)-[r:{rel}]->(b)
+                            SET r += $props
+                            RETURN count(r) as written
+                            """,
+                            from_id=from_id,
+                            to_id=to_id,
+                            props=props,
+                        )
+
+                record = result.single()
+                if not record:
+                    continue
+                edge_count += int(record["written"])
+
+            return {"nodes": node_count, "edges": edge_count}
+
+        with self.driver.session() as session:
+            result = session.execute_write(_import_tx)
+
+        self._create_indexes()
+
+        return result
