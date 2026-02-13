@@ -3,6 +3,7 @@
 import pytest
 
 from src.graph.neo4j_storage import Neo4jStorage
+from src.graph.tests.neo4j_test_config import get_test_neo4j_config, guard_test_uri
 
 
 class TestNeo4jCRUD:
@@ -16,9 +17,9 @@ class TestNeo4jCRUD:
     def storage(self):
         """Create a Neo4j storage instance for testing."""
         try:
-            s = Neo4jStorage(
-                uri="bolt://localhost:7687", user="neo4j", password="obsidian"
-            )
+            uri, user, password = get_test_neo4j_config()
+            guard_test_uri(uri)
+            s = Neo4jStorage(uri=uri, user=user, password=password)
             # Test connection
             s.get_stats()
             yield s
@@ -222,16 +223,21 @@ class TestNeo4jEdgeCases:
     def storage(self):
         """Neo4j storage fixture; skips if Neo4j unavailable."""
         try:
-            s = Neo4jStorage(
-                uri="bolt://localhost:7687", user="neo4j", password="obsidian"
-            )
+            uri, user, password = get_test_neo4j_config()
+            guard_test_uri(uri)
+            s = Neo4jStorage(uri=uri, user=user, password=password)
             s.get_stats()
-            s.clear()
+            s.clear(force=True)
             yield s
-            s.clear()
+            s.clear(force=True)
             s.close()
         except Exception as exc:
             pytest.skip(f"Neo4j not available: {exc}")
+
+    def test_clear_requires_force_flag(self, storage):
+        """clear() must fail without explicit force flag."""
+        with pytest.raises(RuntimeError):
+            storage.clear()
 
     def test_merge_nodes_simple_reports_missing_merge_node(self, storage):
         """Merging with non-existent merge_id should not report success."""
@@ -308,6 +314,169 @@ class TestNeo4jEdgeCases:
         # Props were updated
         assert edges[0]["edge"]["confidence"] == 0.9
 
+    def test_snapshot_roundtrip_preserves_all_node_labels(self, storage):
+        """Importing snapshot should keep all labels on nodes."""
+        with storage.driver.session() as session:
+            session.run(
+                """
+                CREATE (n:Person:Organization {id: $id, name: $name})
+                """,
+                id="person_org:dual",
+                name="Dual Label",
+            )
+
+        snapshot = storage.export_snapshot()
+        storage.clear(force=True)
+        storage.import_snapshot(snapshot, clear_first=False)
+
+        result = storage.get_node("person_org:dual")
+        assert result is not None
+        labels = set(result["node"]["_labels"])
+        assert "Person" in labels
+        assert "Organization" in labels
+
+    def test_snapshot_roundtrip_preserves_parallel_edges_with_ids(self, storage):
+        """Importing snapshot should preserve parallel edges if edge ids differ."""
+        storage.add_node("Concept", "concept:edge_src", "Edge Src", {})
+        storage.add_node("Concept", "concept:edge_tgt", "Edge Tgt", {})
+
+        with storage.driver.session() as session:
+            session.run(
+                """
+                MATCH (a {id: $a}), (b {id: $b})
+                CREATE (a)-[:RELATED_TO {id: 'edge:p1', fact: 'first'}]->(b)
+                CREATE (a)-[:RELATED_TO {id: 'edge:p2', fact: 'second'}]->(b)
+                """,
+                a="concept:edge_src",
+                b="concept:edge_tgt",
+            )
+
+        snapshot = storage.export_snapshot()
+        storage.clear(force=True)
+        storage.import_snapshot(snapshot, clear_first=False)
+
+        edges = storage.find_edges(
+            from_id="concept:edge_src", to_id="concept:edge_tgt", relation="RELATED_TO"
+        )
+        assert len(edges) == 2
+        edge_ids = sorted(e["edge"]["id"] for e in edges)
+        assert edge_ids == ["edge:p1", "edge:p2"]
+
+    def test_import_snapshot_skips_edges_with_missing_nodes(self, storage):
+        """Import should not fail if an edge points to a missing node."""
+        snapshot = {
+            "nodes": [
+                {
+                    "id": "concept:present",
+                    "labels": ["Concept"],
+                    "properties": {"id": "concept:present", "name": "Present"},
+                }
+            ],
+            "edges": [
+                {
+                    "from_id": "concept:present",
+                    "to_id": "concept:missing",
+                    "relation": "RELATED_TO",
+                    "properties": {"id": "edge:missing"},
+                }
+            ],
+        }
+
+        result = storage.import_snapshot(snapshot, clear_first=False)
+        assert result["nodes"] == 1
+        assert result["edges"] == 0
+
+    def test_import_snapshot_no_clear_does_not_duplicate_node_id(self, storage):
+        """Import with no-clear should merge by id, not create duplicate ids."""
+        storage.add_node("Concept", "entity:shared", "Old", {})
+
+        snapshot = {
+            "nodes": [
+                {
+                    "id": "entity:shared",
+                    "labels": ["Person"],
+                    "properties": {"id": "entity:shared", "name": "Updated"},
+                }
+            ],
+            "edges": [],
+        }
+
+        storage.import_snapshot(snapshot, clear_first=False)
+
+        with storage.driver.session() as session:
+            count = session.run(
+                "MATCH (n {id: $id}) RETURN count(n) as c", id="entity:shared"
+            ).single()["c"]
+        assert count == 1
+
+        node = storage.get_node("entity:shared")
+        assert node is not None
+        labels = set(node["node"]["_labels"])
+        assert "Concept" in labels
+        assert "Person" in labels
+
+    def test_import_snapshot_rejects_edge_id_collision(self, storage):
+        """Import should fail if same edge id maps to different endpoints."""
+        storage.add_node("Concept", "concept:a", "A", {})
+        storage.add_node("Concept", "concept:b", "B", {})
+        storage.add_node("Concept", "concept:c", "C", {})
+
+        with storage.driver.session() as session:
+            session.run(
+                """
+                MATCH (a {id: 'concept:a'}), (b {id: 'concept:b'})
+                CREATE (a)-[:RELATED_TO {id: 'edge:collision'}]->(b)
+                """
+            )
+
+        snapshot = {
+            "nodes": [],
+            "edges": [
+                {
+                    "from_id": "concept:a",
+                    "to_id": "concept:c",
+                    "relation": "RELATED_TO",
+                    "properties": {"id": "edge:collision", "fact": "bad remap"},
+                }
+            ],
+        }
+
+        with pytest.raises(ValueError):
+            storage.import_snapshot(snapshot, clear_first=False)
+
+    def test_import_snapshot_no_clear_idless_edge_is_idempotent(self, storage):
+        """Importing id-less edge snapshot twice without clear should not duplicate."""
+        snapshot = {
+            "nodes": [
+                {
+                    "id": "concept:edge_x",
+                    "labels": ["Concept"],
+                    "properties": {"id": "concept:edge_x", "name": "X"},
+                },
+                {
+                    "id": "concept:edge_y",
+                    "labels": ["Concept"],
+                    "properties": {"id": "concept:edge_y", "name": "Y"},
+                },
+            ],
+            "edges": [
+                {
+                    "from_id": "concept:edge_x",
+                    "to_id": "concept:edge_y",
+                    "relation": "RELATED_TO",
+                    "properties": {"fact": "idless"},
+                }
+            ],
+        }
+
+        storage.import_snapshot(snapshot, clear_first=False)
+        storage.import_snapshot(snapshot, clear_first=False)
+
+        edges = storage.find_edges(
+            from_id="concept:edge_x", to_id="concept:edge_y", relation="RELATED_TO"
+        )
+        assert len(edges) == 1
+
 
 class TestSourceNoteEdges:
     """Tests for source_note-aware edge operations."""
@@ -316,13 +485,13 @@ class TestSourceNoteEdges:
     def storage(self):
         """Neo4j storage with cleanup."""
         try:
-            s = Neo4jStorage(
-                uri="bolt://localhost:7687", user="neo4j", password="obsidian"
-            )
+            uri, user, password = get_test_neo4j_config()
+            guard_test_uri(uri)
+            s = Neo4jStorage(uri=uri, user=user, password=password)
             s.get_stats()
-            s.clear()
+            s.clear(force=True)
             yield s
-            s.clear()
+            s.clear(force=True)
             s.close()
         except Exception as exc:
             pytest.skip(f"Neo4j not available: {exc}")

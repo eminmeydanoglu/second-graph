@@ -15,6 +15,7 @@ import pytest
 from src.graph.sync import NoteSynchronizer
 from src.graph.neo4j_storage import Neo4jStorage
 from src.graph.schema import EdgeType, generate_node_id
+from src.graph.tests.neo4j_test_config import get_test_neo4j_config, guard_test_uri
 from src.vector.store import VectorStore
 from src.vector.embedder import Embedder
 
@@ -28,13 +29,13 @@ class TestSourceNoteReconciliation:
     def storage(self):
         """Real Neo4j storage - these are integration tests."""
         try:
-            s = Neo4jStorage(
-                uri="bolt://localhost:7687", user="neo4j", password="obsidian"
-            )
+            uri, user, password = get_test_neo4j_config()
+            guard_test_uri(uri)
+            s = Neo4jStorage(uri=uri, user=user, password=password)
             s.get_stats()
-            s.clear()
+            s.clear(force=True)
             yield s
-            s.clear()
+            s.clear(force=True)
             s.close()
         except Exception:
             pytest.skip("Neo4j not available")

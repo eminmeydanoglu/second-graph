@@ -6,6 +6,7 @@ import subprocess
 import pytest
 
 from src.mcp import server as mcp_server
+from src.graph.tests.neo4j_test_config import get_test_neo4j_config, guard_test_uri
 
 
 class _FakeStorage:
@@ -144,15 +145,17 @@ class TestSyncNoteToolIntegration:
     def init_server(self, tmp_path):
         """Initialize MCP server with real storage."""
         try:
+            uri, user, password = get_test_neo4j_config()
+            guard_test_uri(uri)
             mcp_server.init_server(
-                neo4j_uri="bolt://localhost:7687",
-                neo4j_user="neo4j",
-                neo4j_password="obsidian",
+                neo4j_uri=uri,
+                neo4j_user=user,
+                neo4j_password=password,
                 vector_db=str(tmp_path / "vectors.db"),
             )
-            mcp_server.storage.clear()
+            mcp_server.storage.clear(force=True)
             yield
-            mcp_server.storage.clear()
+            mcp_server.storage.clear(force=True)
             mcp_server.storage.close()
         except Exception as e:
             pytest.skip(f"Neo4j not available: {e}")
