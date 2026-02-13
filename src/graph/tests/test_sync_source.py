@@ -15,7 +15,6 @@ import pytest
 from src.graph.sync import NoteSynchronizer
 from src.graph.neo4j_storage import Neo4jStorage
 from src.graph.schema import EdgeType, generate_node_id
-from src.vector.store import VectorStore
 from src.vector.embedder import Embedder
 
 
@@ -40,18 +39,14 @@ class TestSourceNoteReconciliation:
             pytest.skip("Neo4j not available")
 
     @pytest.fixture
-    def vectors(self, tmp_path):
-        return VectorStore(tmp_path / "vectors.db")
-
-    @pytest.fixture
     def embedder(self):
         mock = Mock(spec=Embedder)
         mock.embed.return_value = [0.1] * 384
         return mock
 
     @pytest.fixture
-    def synchronizer(self, storage, vectors, embedder):
-        return NoteSynchronizer(storage, vectors, embedder)
+    def synchronizer(self, storage, embedder):
+        return NoteSynchronizer(storage, embedder)
 
     def test_non_wikilink_edge_preserved_after_sync(
         self, synchronizer, workspace, storage

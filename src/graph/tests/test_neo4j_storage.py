@@ -471,3 +471,81 @@ class TestSourceNoteEdges:
 
         edges = storage.get_edges_by_source_note("note:nosrc_a", "note:nosrc_a")
         assert len(edges) == 0
+
+
+class TestNeo4jVectorSearch:
+    """Tests for native Neo4j vector search."""
+
+    @pytest.fixture
+    def storage(self):
+        try:
+            s = Neo4jStorage(
+                uri="bolt://localhost:7687", user="neo4j", password="obsidian"
+            )
+            s.get_stats()
+            s.clear()
+            s.ensure_vector_index()
+            yield s
+            s.clear()
+            s.close()
+        except Exception as exc:
+            pytest.skip(f"Neo4j not available: {exc}")
+
+    def test_set_and_search_embedding(self, storage):
+        """Store embedding on node and retrieve via vector search."""
+        storage.add_node(
+            "Concept", "concept:vec_test", "Vector Test", {"summary": "A test concept"}
+        )
+        embedding = [0.1] * 384
+        assert storage.set_embedding("concept:vec_test", embedding) is True
+
+        import time
+
+        time.sleep(1)  # wait for index to catch up
+
+        results = storage.search_similar(embedding, limit=5)
+        assert len(results) >= 1
+        found = [r for r in results if r["node_id"] == "concept:vec_test"]
+        assert len(found) == 1
+        assert found[0]["name"] == "Vector Test"
+        assert found[0]["node_type"] == "Concept"
+        assert "embedding" not in found[0]  # embedding must NOT be exposed
+
+    def test_set_embedding_nonexistent_node(self, storage):
+        """set_embedding on missing node returns False."""
+        assert storage.set_embedding("concept:does_not_exist", [0.1] * 384) is False
+
+    def test_clean_node_strips_embedding(self, storage):
+        """get_node should never expose embedding property."""
+        storage.add_node("Goal", "goal:clean_test", "Clean Test", {})
+        storage.set_embedding("goal:clean_test", [0.5] * 384)
+
+        result = storage.get_node("goal:clean_test")
+        assert result is not None
+        assert "embedding" not in result["node"]
+        # Entity internal label should also be stripped
+        assert "Entity" not in result["node"].get("_labels", [])
+
+    def test_search_with_type_filter(self, storage):
+        """search_similar respects node_types filter."""
+        storage.add_node("Goal", "goal:filter_a", "Goal A", {})
+        storage.add_node("Person", "person:filter_b", "Person B", {})
+        emb = [0.2] * 384
+        storage.set_embedding("goal:filter_a", emb)
+        storage.set_embedding("person:filter_b", emb)
+
+        import time
+
+        time.sleep(1)
+
+        results = storage.search_similar(emb, node_types=["Goal"], limit=10)
+        for r in results:
+            assert r["node_type"] == "Goal"
+
+    def test_stats_hides_entity_label(self, storage):
+        """get_stats should not include Entity in by_label."""
+        storage.add_node("Concept", "concept:stats_test", "Stats Test", {})
+        storage.set_embedding("concept:stats_test", [0.3] * 384)
+
+        stats = storage.get_stats()
+        assert "Entity" not in stats.get("by_label", {})

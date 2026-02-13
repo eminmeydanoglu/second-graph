@@ -43,20 +43,12 @@ class _FakeStorage:
         }
 
 
-class _FakeVectors:
-    """Fake vector store for testing."""
-
-    def delete_entity(self, node_id: str) -> bool:
-        return False
-
-
 class TestMCPFailurePropagation:
     """Tests for MCP tool failure propagation."""
 
     def test_delete_node_propagates_failure(self, monkeypatch):
         """MCP delete_node should set success False when deletion fails."""
         monkeypatch.setattr(mcp_server, "storage", _FakeStorage())
-        monkeypatch.setattr(mcp_server, "vectors", _FakeVectors())
 
         result = mcp_server.delete_node("goal:missing")
 
@@ -66,7 +58,6 @@ class TestMCPFailurePropagation:
     def test_merge_nodes_propagates_failure(self, monkeypatch):
         """MCP merge_nodes should set success False when merge fails."""
         monkeypatch.setattr(mcp_server, "storage", _FakeStorage())
-        monkeypatch.setattr(mcp_server, "vectors", _FakeVectors())
 
         result = mcp_server.merge_nodes("goal:keep", "goal:missing")
 

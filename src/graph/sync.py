@@ -7,14 +7,13 @@ from typing import Any
 from ..parser.markdown import parse_note, ParsedNote
 from .neo4j_storage import Neo4jStorage
 from .schema import NodeType, EdgeType, generate_node_id
-from ..vector.store import VectorStore
 from ..vector.embedder import Embedder
 
 log = logging.getLogger(__name__)
 
 
 class NoteSynchronizer:
-    """Synchronizes Obsidian notes with the Neo4j graph and Vector store.
+    """Synchronizes Obsidian notes with the Neo4j graph.
 
     Performs 'intelligent sync':
     1. Parses the note file.
@@ -22,17 +21,15 @@ class NoteSynchronizer:
     3. Adds missing edges/nodes.
     4. Removes deleted edges.
     5. Updates node properties.
-    6. Refreshes vector embeddings.
+    6. Stores embeddings in Neo4j (native vector index).
     """
 
     def __init__(
         self,
         storage: Neo4jStorage,
-        vectors: VectorStore,
         embedder: Embedder,
     ):
         self.storage = storage
-        self.vectors = vectors
         self.embedder = embedder
 
     def source_note(self, file_path: str | Path) -> dict[str, Any]:
@@ -142,18 +139,11 @@ class NoteSynchronizer:
         return stats
 
     def _update_embedding(self, node_id: str, node_type: str, note: ParsedNote):
-        """Update vector store embedding."""
+        """Store embedding on the Neo4j node."""
         text = f"# {note.title}\n\n"
         if note.tags:
             text += f"Tags: {', '.join(note.tags)}\n"
         text += f"{note.content}"
 
         embedding = self.embedder.embed(text)
-
-        self.vectors.add_entity(
-            node_id=node_id,
-            node_type=node_type,
-            name=note.title,
-            summary=note.content[:1000],  # Store first 1k chars as summary
-            embedding=embedding,
-        )
+        self.storage.set_embedding(node_id, embedding)

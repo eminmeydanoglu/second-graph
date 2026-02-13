@@ -8,7 +8,6 @@ import pytest
 
 from src.graph.sync import NoteSynchronizer
 from src.graph.neo4j_storage import Neo4jStorage
-from src.vector.store import VectorStore
 from src.vector.embedder import Embedder
 
 
@@ -36,12 +35,8 @@ class TestNoteSynchronizer:
             mock.get_neighbors.return_value = []
             mock.find_nodes.return_value = []
             mock.find_edges.return_value = []
+            mock.set_embedding.return_value = True
             yield mock
-
-    @pytest.fixture
-    def vectors(self, tmp_path):
-        """Real vector store in tmp dir."""
-        return VectorStore(tmp_path / "vectors.db")
 
     @pytest.fixture
     def embedder(self):
@@ -51,8 +46,8 @@ class TestNoteSynchronizer:
         return mock
 
     @pytest.fixture
-    def synchronizer(self, storage, vectors, embedder):
-        return NoteSynchronizer(storage, vectors, embedder)
+    def synchronizer(self, storage, embedder):
+        return NoteSynchronizer(storage, embedder)
 
     def test_sync_new_note(self, synchronizer, workspace, storage):
         """Test syncing a new file creates nodes and edges."""

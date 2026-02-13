@@ -36,7 +36,6 @@ Use update_node/delete_node for modifications.
 )
 
 storage: Neo4jStorage | None = None
-vectors: VectorStore | None = None
 embedder: Embedder | None = None
 synchronizer: NoteSynchronizer | None = None
 tracker: NoteTracker | None = None
@@ -49,11 +48,14 @@ def init_server(
     vector_db: str = "data/vectors.db",
 ):
     """Initialize server with database connections."""
-    global storage, vectors, embedder, synchronizer, tracker
+    global storage, embedder, synchronizer, tracker
     storage = Neo4jStorage(uri=neo4j_uri, user=neo4j_user, password=neo4j_password)
-    vectors = VectorStore(vector_db)
+    storage.ensure_vector_index()
     embedder = Embedder()
-    synchronizer = NoteSynchronizer(storage, vectors, embedder)
+    synchronizer = NoteSynchronizer(storage, embedder)
+
+    # VectorStore still used for extraction tracking (note hashes, diffs)
+    vectors = VectorStore(vector_db)
     tracker = NoteTracker(vectors)
 
 
@@ -62,13 +64,6 @@ def _require_storage() -> Neo4jStorage:
     if storage is None:
         raise RuntimeError("Server not initialized. Call init_server() first.")
     return storage
-
-
-def _require_vectors() -> VectorStore:
-    """Get vector store or raise error."""
-    if vectors is None:
-        raise RuntimeError("Server not initialized. Call init_server() first.")
-    return vectors
 
 
 def _require_embedder() -> Embedder:
@@ -115,9 +110,9 @@ def add_node(
 
     if summary:
         emb = _require_embedder()
-        vecs = _require_vectors()
+        db = _require_storage()
         embedding = emb.embed(f"{name}: {summary}")
-        vecs.add_entity(node_id, node_type, name, summary, embedding)
+        db.set_embedding(node_id, embedding)
 
     return {"success": True, "node_id": node_id, "node": result}
 
@@ -180,12 +175,10 @@ def update_node(node_id: str, properties: dict) -> dict:
         node = db.get_node(node_id)
         if node:
             name = node["node"].get("name", "")
-            node_type = node["node"].get("_labels", ["Unknown"])[0]
             summary = properties["summary"]
             emb = _require_embedder()
-            vecs = _require_vectors()
             embedding = emb.embed(f"{name}: {summary}")
-            vecs.add_entity(node_id, node_type, name, summary, embedding)
+            db.set_embedding(node_id, embedding)
 
     return {"success": True, "node": result}
 
@@ -202,9 +195,6 @@ def delete_node(node_id: str) -> dict:
     """
     db = _require_storage()
     result = db.delete_node(node_id)
-
-    vecs = _require_vectors()
-    vecs.delete_entity(node_id)
 
     success = result.get("deleted", False)
     return {"success": success, **result}
@@ -224,10 +214,6 @@ def merge_nodes(keep_id: str, merge_id: str) -> dict:
     db = _require_storage()
 
     result = db.merge_nodes_simple(keep_id, merge_id)
-
-    if result.get("merged", False):
-        vecs = _require_vectors()
-        vecs.delete_entity(merge_id)
 
     success = result.get("merged", False)
     return {"success": success, **result}
@@ -385,10 +371,10 @@ def search_entities(
         Dict with matching entities ranked by similarity
     """
     emb = _require_embedder()
-    vecs = _require_vectors()
+    db = _require_storage()
 
     query_embedding = emb.embed(query)
-    results = vecs.search_entities(query_embedding, node_types, limit)
+    results = db.search_similar(query_embedding, node_types, limit)
     return {"success": True, "count": len(results), "entities": results}
 
 
