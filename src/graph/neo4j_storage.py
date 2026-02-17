@@ -207,6 +207,24 @@ class Neo4jStorage:
 
             return {"node": self._clean_node(node_dict), "connections": connections}
 
+    def list_nodes(self) -> list[dict]:
+        """List all nodes with labels for bulk operations."""
+        with self.driver.session() as session:
+            result = session.run(
+                """
+                MATCH (n)
+                RETURN n, labels(n) as labels
+                ORDER BY n.id
+                """
+            )
+
+            nodes: list[dict] = []
+            for record in result:
+                node_dict = dict(record["n"])
+                node_dict["_labels"] = record["labels"]
+                nodes.append(self._clean_node(node_dict))
+            return nodes
+
     def find_nodes(
         self, name: str, node_type: str | None = None, match_type: str = "contains"
     ) -> list[dict]:
