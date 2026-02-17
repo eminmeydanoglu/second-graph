@@ -160,3 +160,28 @@ type: note
             node = storage.get_node(result["node_id"])
             assert node is not None
             assert "Note" in node["node"].get("_labels", [])
+
+    def test_sync_embedding_uses_routing_text_not_full_content(
+        self, synchronizer, workspace, embedder
+    ):
+        """Embedding text should come from routing metadata, not note body."""
+        note_path = workspace / "Routing Text.md"
+        note_path.write_text(
+            """---
+type: Note
+summary: Compact summary
+tags: [memory]
+---
+# Routing Text
+
+This body should never appear inside embedding payload.
+"""
+        )
+
+        result = synchronizer.sync_note_from_file(note_path)
+
+        assert result["success"] is True
+
+        embed_text = embedder.embed.call_args[0][0]
+        assert embed_text == "Note: Routing Text. Compact summary. Tags: memory"
+        assert "never appear" not in embed_text
