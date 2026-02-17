@@ -204,6 +204,97 @@ class TestPrivacyFiltering:
         assert "Entity" not in result["by_label"]
 
 
+class _RoutingStorage:
+    def __init__(self):
+        self.embeddings: list[tuple[str, list[float]]] = []
+        self.updated: dict[str, dict] = {}
+
+    def add_node(self, node_type: str, node_id: str, name: str, props: dict):
+        labels = [node_type]
+        node = {"id": node_id, "name": name, "_labels": labels, **props}
+        self.updated[node_id] = node
+        return node
+
+    def update_node(self, node_id: str, properties: dict):
+        node = self.updated.setdefault(node_id, {"id": node_id, "name": "Unknown"})
+        node.update(properties)
+        return node
+
+    def get_node(self, node_id: str):
+        node = self.updated.get(node_id)
+        if not node:
+            return None
+        return {"node": node, "connections": []}
+
+    def set_embedding(self, node_id: str, embedding: list[float]):
+        self.embeddings.append((node_id, embedding))
+        return True
+
+
+class _CaptureEmbedder:
+    def __init__(self):
+        self.texts: list[str] = []
+
+    def embed(self, text: str) -> list[float]:
+        self.texts.append(text)
+        return [0.2] * 384
+
+
+class TestRoutingEmbeddings:
+    def test_add_node_embeds_without_summary(self, monkeypatch):
+        storage = _RoutingStorage()
+        emb = _CaptureEmbedder()
+        monkeypatch.setattr(mcp_server, "storage", storage)
+        monkeypatch.setattr(mcp_server, "embedder", emb)
+
+        result = mcp_server.add_node(
+            "Person",
+            "Girard",
+            properties={"relationship": "influential"},
+        )
+
+        assert result["success"] is True
+        assert len(storage.embeddings) == 1
+        assert emb.texts[-1] == "Person: Girard. Relationship: influential"
+
+    def test_update_node_reembeds_when_routing_field_changes(self, monkeypatch):
+        storage = _RoutingStorage()
+        storage.updated["concept:rl"] = {
+            "id": "concept:rl",
+            "name": "RL",
+            "summary": "Learning from rewards",
+            "domain": "AI",
+            "_labels": ["Concept"],
+        }
+        emb = _CaptureEmbedder()
+        monkeypatch.setattr(mcp_server, "storage", storage)
+        monkeypatch.setattr(mcp_server, "embedder", emb)
+
+        result = mcp_server.update_node("concept:rl", {"domain": "AI"})
+
+        assert result["success"] is True
+        assert len(storage.embeddings) == 1
+        assert emb.texts[-1] == "Concept: RL. Learning from rewards. Domain: AI"
+
+    def test_update_node_skips_reembed_for_non_routing_fields(self, monkeypatch):
+        storage = _RoutingStorage()
+        storage.updated["concept:rl"] = {
+            "id": "concept:rl",
+            "name": "RL",
+            "summary": "Learning from rewards",
+            "domain": "AI",
+            "_labels": ["Concept"],
+        }
+        emb = _CaptureEmbedder()
+        monkeypatch.setattr(mcp_server, "storage", storage)
+        monkeypatch.setattr(mcp_server, "embedder", emb)
+
+        result = mcp_server.update_node("concept:rl", {"updated_at": "2026-01-01"})
+
+        assert result["success"] is True
+        assert len(storage.embeddings) == 0
+
+
 class TestCLIEntrypoint:
     """Tests for CLI entrypoint."""
 

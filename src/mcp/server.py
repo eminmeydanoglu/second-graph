@@ -9,9 +9,8 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from ..graph.neo4j_storage import Neo4jStorage
+from ..graph.routing_text import build_routing_text
 from ..graph.schema import (
-    NodeType,
-    EdgeType,
     validate_node_type,
     validate_edge,
     generate_node_id,
@@ -41,6 +40,22 @@ storage: Neo4jStorage | None = None
 embedder: Embedder | None = None
 synchronizer: NoteSynchronizer | None = None
 tracker: NoteTracker | None = None
+
+ROUTING_FIELDS = {
+    "summary",
+    "name",
+    "title",
+    "tags",
+    "domain",
+    "status",
+    "horizon",
+    "role",
+    "relationship",
+    "priority",
+    "author",
+    "type",
+    "intensity",
+}
 
 
 def init_server(
@@ -148,11 +163,10 @@ def add_node(
     if not result:
         return {"success": False, "error": "Failed to create node"}
 
-    if summary:
-        emb = _require_embedder()
-        db = _require_storage()
-        embedding = emb.embed(f"{name}: {summary}")
-        db.set_embedding(node_id, embedding)
+    emb = _require_embedder()
+    text = build_routing_text(node_type, {"name": name, **props})
+    embedding = emb.embed(text)
+    db.set_embedding(node_id, embedding)
 
     return _strip_internal_dict({"success": True, "node_id": node_id, "node": result})
 
@@ -213,13 +227,14 @@ def update_node(node_id: str, properties: dict) -> dict:
     if not result:
         return {"success": False, "error": f"Node not found: {node_id}"}
 
-    if "summary" in properties:
+    if ROUTING_FIELDS.intersection(properties):
         node = db.get_node(node_id)
         if node:
-            name = node["node"].get("name", "")
-            summary = properties["summary"]
+            node_props = node["node"]
+            node_type = _canonical_node_type_from_labels(node_props.get("_labels", []))
+            text = build_routing_text(node_type, node_props)
             emb = _require_embedder()
-            embedding = emb.embed(f"{name}: {summary}")
+            embedding = emb.embed(text)
             db.set_embedding(node_id, embedding)
 
     return _strip_internal_dict({"success": True, "node": result})

@@ -9,6 +9,8 @@ import click
 from .graph.scanner import VaultScanner
 from .graph.sync import NoteSynchronizer
 from .graph.neo4j_storage import Neo4jStorage
+from .graph.routing_text import build_routing_text
+from .graph.schema import get_node_types
 from .vector.embedder import Embedder
 
 
@@ -16,6 +18,15 @@ from .vector.embedder import Embedder
 def cli():
     """Obsidian Brain - Knowledge graph for your vault."""
     pass
+
+
+def _canonical_node_type_from_labels(labels: list[str]) -> str:
+    """Pick canonical schema type from node labels."""
+    valid_types = get_node_types()
+    for node_type in valid_types:
+        if node_type in labels:
+            return node_type
+    return "Unknown"
 
 
 @cli.command("sync-vault")
@@ -72,6 +83,55 @@ def search(query: str, uri: str, user: str, password: str, limit: int):
             if r.get("summary"):
                 click.echo(f"   {r['summary'][:200]}...")
             click.echo()
+    finally:
+        storage.close()
+
+
+@cli.command("re-embed")
+@click.option("--uri", default="bolt://localhost:7687", help="Neo4j URI")
+@click.option("--user", default="neo4j", help="Neo4j username")
+@click.option("--password", default="obsidian", help="Neo4j password")
+def re_embed(uri: str, user: str, password: str):
+    """Regenerate embeddings for all nodes using routing-text format."""
+    storage = Neo4jStorage(uri=uri, user=user, password=password)
+    embedder = Embedder()
+
+    try:
+        nodes = storage.list_nodes()
+        total = len(nodes)
+        click.echo(f"Re-embedding {total} nodes...")
+
+        updated = 0
+        skipped = 0
+        errors = 0
+
+        for index, node in enumerate(nodes, 1):
+            node_id = node.get("id")
+            if not node_id:
+                skipped += 1
+                continue
+
+            node_type = _canonical_node_type_from_labels(node.get("_labels", []))
+            text = build_routing_text(node_type, node)
+
+            try:
+                embedding = embedder.embed(text)
+                if storage.set_embedding(node_id, embedding):
+                    updated += 1
+                else:
+                    errors += 1
+            except Exception as exc:
+                errors += 1
+                click.echo(f"  [error] {node_id}: {exc}")
+
+            if index % 25 == 0 or index == total:
+                click.echo(
+                    f"  [{index}/{total}] updated={updated} skipped={skipped} errors={errors}"
+                )
+
+        click.echo(
+            f"Done. updated={updated} skipped={skipped} errors={errors} total={total}"
+        )
     finally:
         storage.close()
 

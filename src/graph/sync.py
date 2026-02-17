@@ -6,6 +6,7 @@ from typing import Any
 
 from ..parser.markdown import parse_note, ParsedNote
 from .neo4j_storage import Neo4jStorage
+from .routing_text import build_routing_text
 from .schema import NodeType, EdgeType, generate_node_id
 from ..vector.embedder import Embedder
 
@@ -205,10 +206,13 @@ class NoteSynchronizer:
 
     def _update_embedding(self, node_id: str, node_type: str, note: ParsedNote):
         """Store embedding on the Neo4j node."""
-        text = f"# {note.title}\n\n"
-        if note.tags:
-            text += f"Tags: {', '.join(note.tags)}\n"
-        text += f"{note.content}"
+        props = {
+            **note.frontmatter,
+            "name": note.title,
+            "title": note.title,
+            "tags": note.tags,
+        }
+        text = build_routing_text(node_type, props)
 
         embedding = self.embedder.embed(text)
         self.storage.set_embedding(node_id, embedding)
