@@ -4,6 +4,8 @@ Exposes knowledge graph CRUD operations as MCP tools.
 Used by the Graph Agent (subagent) for runtime memory manipulation.
 """
 
+from typing import Any
+
 from mcp.server.fastmcp import FastMCP
 
 from ..graph.neo4j_storage import Neo4jStorage
@@ -36,7 +38,6 @@ Use update_node/delete_node for modifications.
 )
 
 storage: Neo4jStorage | None = None
-vectors: VectorStore | None = None
 embedder: Embedder | None = None
 synchronizer: NoteSynchronizer | None = None
 tracker: NoteTracker | None = None
@@ -49,11 +50,14 @@ def init_server(
     vector_db: str = "data/vectors.db",
 ):
     """Initialize server with database connections."""
-    global storage, vectors, embedder, synchronizer, tracker
+    global storage, embedder, synchronizer, tracker
     storage = Neo4jStorage(uri=neo4j_uri, user=neo4j_user, password=neo4j_password)
-    vectors = VectorStore(vector_db)
+    storage.ensure_vector_index()
     embedder = Embedder()
-    synchronizer = NoteSynchronizer(storage, vectors, embedder)
+    synchronizer = NoteSynchronizer(storage, embedder)
+
+    # VectorStore still used for extraction tracking (note hashes, diffs)
+    vectors = VectorStore(vector_db)
     tracker = NoteTracker(vectors)
 
 
@@ -64,18 +68,49 @@ def _require_storage() -> Neo4jStorage:
     return storage
 
 
-def _require_vectors() -> VectorStore:
-    """Get vector store or raise error."""
-    if vectors is None:
-        raise RuntimeError("Server not initialized. Call init_server() first.")
-    return vectors
-
-
 def _require_embedder() -> Embedder:
     """Get embedder or raise error."""
     if embedder is None:
         raise RuntimeError("Server not initialized. Call init_server() first.")
     return embedder
+
+
+def _strip_internal_fields(data: Any) -> Any:
+    """Recursively remove internal vector fields from MCP responses."""
+    if isinstance(data, dict):
+        cleaned = {}
+        for key, value in data.items():
+            if key == "embedding":
+                continue
+            if key in {"_labels", "neighbor_labels"} and isinstance(value, list):
+                cleaned[key] = [label for label in value if label != "Entity"]
+                continue
+            if key == "by_label" and isinstance(value, dict):
+                cleaned[key] = {
+                    k: _strip_internal_fields(v)
+                    for k, v in value.items()
+                    if k != "Entity"
+                }
+                continue
+            cleaned[key] = _strip_internal_fields(value)
+        return cleaned
+    if isinstance(data, list):
+        return [_strip_internal_fields(item) for item in data]
+    return data
+
+
+def _strip_internal_dict(data: dict) -> dict:
+    """Typed wrapper for dict responses."""
+    return _strip_internal_fields(data)
+
+
+def _canonical_node_type_from_labels(labels: list[str]) -> str:
+    """Pick canonical schema type from labels deterministically."""
+    valid_types = get_node_types()
+    for node_type in valid_types:
+        if node_type in labels:
+            return node_type
+    return "Unknown"
 
 
 @mcp.tool()
@@ -115,11 +150,11 @@ def add_node(
 
     if summary:
         emb = _require_embedder()
-        vecs = _require_vectors()
+        db = _require_storage()
         embedding = emb.embed(f"{name}: {summary}")
-        vecs.add_entity(node_id, node_type, name, summary, embedding)
+        db.set_embedding(node_id, embedding)
 
-    return {"success": True, "node_id": node_id, "node": result}
+    return _strip_internal_dict({"success": True, "node_id": node_id, "node": result})
 
 
 @mcp.tool()
@@ -136,7 +171,7 @@ def get_node(node_id: str) -> dict:
     result = db.get_node(node_id)
     if not result:
         return {"success": False, "error": f"Node not found: {node_id}"}
-    return {"success": True, **result}
+    return _strip_internal_dict({"success": True, **result})
 
 
 @mcp.tool()
@@ -157,7 +192,9 @@ def find_node(
     """
     db = _require_storage()
     results = db.find_nodes(name, node_type, match_type)
-    return {"success": True, "count": len(results), "nodes": results}
+    return _strip_internal_dict(
+        {"success": True, "count": len(results), "nodes": results}
+    )
 
 
 @mcp.tool()
@@ -180,14 +217,12 @@ def update_node(node_id: str, properties: dict) -> dict:
         node = db.get_node(node_id)
         if node:
             name = node["node"].get("name", "")
-            node_type = node["node"].get("_labels", ["Unknown"])[0]
             summary = properties["summary"]
             emb = _require_embedder()
-            vecs = _require_vectors()
             embedding = emb.embed(f"{name}: {summary}")
-            vecs.add_entity(node_id, node_type, name, summary, embedding)
+            db.set_embedding(node_id, embedding)
 
-    return {"success": True, "node": result}
+    return _strip_internal_dict({"success": True, "node": result})
 
 
 @mcp.tool()
@@ -202,9 +237,6 @@ def delete_node(node_id: str) -> dict:
     """
     db = _require_storage()
     result = db.delete_node(node_id)
-
-    vecs = _require_vectors()
-    vecs.delete_entity(node_id)
 
     success = result.get("deleted", False)
     return {"success": success, **result}
@@ -224,10 +256,6 @@ def merge_nodes(keep_id: str, merge_id: str) -> dict:
     db = _require_storage()
 
     result = db.merge_nodes_simple(keep_id, merge_id)
-
-    if result.get("merged", False):
-        vecs = _require_vectors()
-        vecs.delete_entity(merge_id)
 
     success = result.get("merged", False)
     return {"success": success, **result}
@@ -261,8 +289,12 @@ def add_edge(
     if not target_node:
         return {"success": False, "error": f"Target node not found: {to_id}"}
 
-    source_type = source_node["node"].get("_labels", ["Unknown"])[0]
-    target_type = target_node["node"].get("_labels", ["Unknown"])[0]
+    source_type = _canonical_node_type_from_labels(
+        source_node["node"].get("_labels", [])
+    )
+    target_type = _canonical_node_type_from_labels(
+        target_node["node"].get("_labels", [])
+    )
 
     validation = validate_edge(source_type, target_type, relation, strict=True)
     if not validation.valid:
@@ -344,7 +376,9 @@ def get_neighbors(
     """
     db = _require_storage()
     results = db.get_neighbors(node_id, direction, edge_types)
-    return {"success": True, "count": len(results), "neighbors": results}
+    return _strip_internal_dict(
+        {"success": True, "count": len(results), "neighbors": results}
+    )
 
 
 @mcp.tool()
@@ -385,11 +419,13 @@ def search_entities(
         Dict with matching entities ranked by similarity
     """
     emb = _require_embedder()
-    vecs = _require_vectors()
+    db = _require_storage()
 
     query_embedding = emb.embed(query)
-    results = vecs.search_entities(query_embedding, node_types, limit)
-    return {"success": True, "count": len(results), "entities": results}
+    results = db.search_similar(query_embedding, node_types, limit)
+    return _strip_internal_dict(
+        {"success": True, "count": len(results), "entities": results}
+    )
 
 
 @mcp.tool()
@@ -415,7 +451,7 @@ def get_stats() -> dict:
     """
     db = _require_storage()
     stats = db.get_stats()
-    return {"success": True, **stats}
+    return _strip_internal_dict({"success": True, **stats})
 
 
 def _require_synchronizer() -> NoteSynchronizer:
@@ -426,12 +462,11 @@ def _require_synchronizer() -> NoteSynchronizer:
 
 
 @mcp.tool()
-def source_note(path: str) -> dict:
-    """Source a markdown note file into the knowledge graph.
+def sync_note(path: str) -> dict:
+    """Sync a markdown note file into the knowledge graph.
 
-    Parses the note, creates/updates nodes, and reconciles wikilink edges.
-    Only modifies WIKILINK edges with source_note=node_id for this note,
-    preserving edges from other notes or other relation types.
+    Parses the note, creates/updates nodes, reconciles wikilink edges,
+    syncs tags, and updates vector embeddings.
 
     Args:
         path: Absolute path to the markdown file
@@ -440,7 +475,14 @@ def source_note(path: str) -> dict:
         Dict with sync results (node_id, action, edges changed, source_note)
     """
     sync = _require_synchronizer()
-    return sync.source_note(path)
+    return _strip_internal_dict(sync.sync_note_from_file(path))
+
+
+# Alias for backward compatibility
+@mcp.tool()
+def source_note(path: str) -> dict:
+    """Alias for sync_note. Use sync_note instead."""
+    return sync_note(path)
 
 
 def _require_tracker() -> NoteTracker:

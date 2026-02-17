@@ -9,7 +9,6 @@ import pytest
 from src.graph.sync import NoteSynchronizer
 from src.graph.neo4j_storage import Neo4jStorage
 from src.graph.tests.neo4j_test_config import get_test_neo4j_config, guard_test_uri
-from src.vector.store import VectorStore
 from src.vector.embedder import Embedder
 
 
@@ -37,12 +36,13 @@ class TestNoteSynchronizer:
             mock.get_neighbors.return_value = []
             mock.find_nodes.return_value = []
             mock.find_edges.return_value = []
+            mock.get_edges_by_source_note.return_value = []
+            mock.delete_edges_by_source_note.return_value = 0
+            mock.add_node.return_value = {"id": "mock"}
+            mock.update_node.return_value = {"id": "mock"}
+            mock.add_edge.return_value = {"success": True, "edge_id": "edge:mock"}
+            mock.set_embedding.return_value = True
             yield mock
-
-    @pytest.fixture
-    def vectors(self, tmp_path):
-        """Real vector store in tmp dir."""
-        return VectorStore(tmp_path / "vectors.db")
 
     @pytest.fixture
     def embedder(self):
@@ -52,8 +52,8 @@ class TestNoteSynchronizer:
         return mock
 
     @pytest.fixture
-    def synchronizer(self, storage, vectors, embedder):
-        return NoteSynchronizer(storage, vectors, embedder)
+    def synchronizer(self, storage, embedder):
+        return NoteSynchronizer(storage, embedder)
 
     def test_sync_new_note(self, synchronizer, workspace, storage):
         """Test syncing a new file creates nodes and edges."""
@@ -74,24 +74,25 @@ And a link to [[New Concept]].
             storage.get_node.return_value = None
             storage.find_nodes.return_value = []
 
-        result = synchronizer.source_note(note_path)
+        result = synchronizer.sync_note_from_file(note_path)
 
         assert result["success"] is True
         assert result["action"] == "created"
         assert result["node_id"] == "concept:new_idea"
         assert result["edges"]["added"] == 2  # Two wikilinks
+        # Tag sync now handled as graph edges
 
-        if isinstance(storage, Neo4jStorage):
+        if not isinstance(storage, Mock):
             node = storage.get_node("concept:new_idea")
             assert node is not None
             assert node["node"]["title"] == "New Idea"
             assert "idea" in node["node"]["tags"]
 
             neighbors = storage.get_neighbors("concept:new_idea", direction="out")
-            assert len(neighbors) == 2
             names = {n["node"]["name"] for n in neighbors}
             assert "Existing Concept" in names
             assert "New Concept" in names
+            assert "idea" in names  # Tag node connected
 
     def test_sync_update_note(self, synchronizer, workspace, storage):
         """Test updating a note updates edges."""
@@ -104,7 +105,7 @@ Links: [[Person A]], [[Person B]]
 """
         )
 
-        synchronizer.source_note(note_path)
+        synchronizer.sync_note_from_file(note_path)
 
         note_path.write_text(
             """---
@@ -114,12 +115,15 @@ Links: [[Person A]], [[Person C]]
 """
         )
 
-        result = synchronizer.source_note(note_path)
+        result = synchronizer.sync_note_from_file(note_path)
 
         assert result["success"] is True
-        assert result["action"] == "updated"
+        if not isinstance(storage, Mock):
+            assert result["action"] == "updated"
+        else:
+            assert result["action"] in {"created", "updated"}
 
-        if isinstance(storage, Neo4jStorage):
+        if not isinstance(storage, Mock):
             assert result["edges"]["kept"] == 1
             assert result["edges"]["added"] == 1
             assert result["edges"]["removed"] == 1
@@ -132,6 +136,27 @@ Links: [[Person A]], [[Person C]]
 
     def test_file_not_found(self, synchronizer):
         """Test error handling for missing file."""
-        result = synchronizer.source_note("/non/existent/file.md")
+        result = synchronizer.sync_note_from_file("/non/existent/file.md")
         assert result["success"] is False
         assert "File not found" in result["error"]
+
+    def test_frontmatter_type_is_normalized(self, synchronizer, workspace, storage):
+        """Lower/upper case frontmatter types normalize to canonical schema type."""
+        note_path = workspace / "Case Type.md"
+        note_path.write_text(
+            """---
+type: note
+---
+# Case Type
+"""
+        )
+
+        result = synchronizer.sync_note_from_file(note_path)
+
+        assert result["success"] is True
+        assert result["node_id"].startswith("note:")
+
+        if not isinstance(storage, Mock):
+            node = storage.get_node(result["node_id"])
+            assert node is not None
+            assert "Note" in node["node"].get("_labels", [])

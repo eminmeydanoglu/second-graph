@@ -16,7 +16,6 @@ from src.graph.sync import NoteSynchronizer
 from src.graph.neo4j_storage import Neo4jStorage
 from src.graph.schema import EdgeType, generate_node_id
 from src.graph.tests.neo4j_test_config import get_test_neo4j_config, guard_test_uri
-from src.vector.store import VectorStore
 from src.vector.embedder import Embedder
 
 
@@ -41,18 +40,14 @@ class TestSourceNoteReconciliation:
             pytest.skip("Neo4j not available")
 
     @pytest.fixture
-    def vectors(self, tmp_path):
-        return VectorStore(tmp_path / "vectors.db")
-
-    @pytest.fixture
     def embedder(self):
         mock = Mock(spec=Embedder)
         mock.embed.return_value = [0.1] * 384
         return mock
 
     @pytest.fixture
-    def synchronizer(self, storage, vectors, embedder):
-        return NoteSynchronizer(storage, vectors, embedder)
+    def synchronizer(self, storage, embedder):
+        return NoteSynchronizer(storage, embedder)
 
     def test_non_wikilink_edge_preserved_after_sync(
         self, synchronizer, workspace, storage
@@ -69,7 +64,7 @@ Link to [[Note B]].
 """
         )
 
-        result = synchronizer.source_note(note_a)
+        result = synchronizer.sync_note_from_file(note_a)
         assert result["success"]
         assert result["edges"]["added"] == 1
 
@@ -108,7 +103,7 @@ Now links to [[Note D]] instead.
 """
         )
 
-        result2 = synchronizer.source_note(note_a)
+        result2 = synchronizer.sync_note_from_file(note_a)
         assert result2["success"]
         assert result2["edges"]["removed"] == 1  # B removed
         assert result2["edges"]["added"] == 1  # D added
@@ -131,7 +126,7 @@ Now links to [[Note D]] instead.
         note = workspace / "Source Check.md"
         note.write_text("# Source Check\n\nContent.")
 
-        result = synchronizer.source_note(note)
+        result = synchronizer.sync_note_from_file(note)
 
         assert "source_note" in result
         assert result["source_note"].startswith("note:")
@@ -143,7 +138,7 @@ Now links to [[Note D]] instead.
         note_a = workspace / "Note A.md"
         note_a.write_text("# Note A\n\n[[Shared Target]]")
 
-        result_a = synchronizer.source_note(note_a)
+        result_a = synchronizer.sync_note_from_file(note_a)
         node_a_id = result_a["node_id"]
 
         # Manually add a WIKILINK from note_a's target with a different source_note
@@ -157,10 +152,28 @@ Now links to [[Note D]] instead.
 
         # Re-sync note A — should not touch the reverse wikilink
         note_a.write_text("# Note A\n\n[[Different Target]]")
-        result_a2 = synchronizer.source_note(note_a)
+        result_a2 = synchronizer.sync_note_from_file(note_a)
 
         # The reverse wikilink (owned by target) should survive
         reverse_edges = storage.get_edges_by_source_note(
             target_id, target_id, relation="WIKILINK"
         )
         assert len(reverse_edges) == 1
+
+    def test_wikilink_uses_note_identity_not_other_type(
+        self, synchronizer, workspace, storage
+    ):
+        """Wikilinks should resolve to Note identity, not first same-name non-note node."""
+        storage.add_node("Concept", "concept:shared_name", "Shared Name", {})
+
+        note = workspace / "Main.md"
+        note.write_text("# Main\n\n[[Shared Name]]")
+
+        result = synchronizer.sync_note_from_file(note)
+        assert result["success"]
+
+        neighbors = storage.get_neighbors(result["node_id"], direction="out")
+        target_ids = {n["node"]["id"] for n in neighbors}
+
+        assert "note:shared_name" in target_ids
+        assert "concept:shared_name" not in target_ids

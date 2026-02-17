@@ -7,14 +7,13 @@ from typing import Any
 from ..parser.markdown import parse_note, ParsedNote
 from .neo4j_storage import Neo4jStorage
 from .schema import NodeType, EdgeType, generate_node_id
-from ..vector.store import VectorStore
 from ..vector.embedder import Embedder
 
 log = logging.getLogger(__name__)
 
 
 class NoteSynchronizer:
-    """Synchronizes Obsidian notes with the Neo4j graph and Vector store.
+    """Synchronizes Obsidian notes with the Neo4j graph.
 
     Performs 'intelligent sync':
     1. Parses the note file.
@@ -22,21 +21,19 @@ class NoteSynchronizer:
     3. Adds missing edges/nodes.
     4. Removes deleted edges.
     5. Updates node properties.
-    6. Refreshes vector embeddings.
+    6. Stores embeddings in Neo4j (native vector index).
     """
 
     def __init__(
         self,
         storage: Neo4jStorage,
-        vectors: VectorStore,
         embedder: Embedder,
     ):
         self.storage = storage
-        self.vectors = vectors
         self.embedder = embedder
 
-    def source_note(self, file_path: str | Path) -> dict[str, Any]:
-        """Source a single note file into the graph.
+    def sync_note_from_file(self, file_path: str | Path) -> dict[str, Any]:
+        """Sync a single note file into the graph.
 
         Args:
             file_path: Absolute path to the markdown file.
@@ -72,7 +69,9 @@ class NoteSynchronizer:
             action = "created"
 
         edge_stats = self._sync_wikilinks(node_id, note.wikilinks)
+        tag_stats = self._sync_tags(node_id, note.tags)
 
+        # Still update tags property for easy access, but now we also have real graph edges
         self.storage.update_node(node_id, {"tags": note.tags})
 
         self._update_embedding(node_id, node_type, note)
@@ -82,13 +81,20 @@ class NoteSynchronizer:
             "node_id": node_id,
             "action": action,
             "edges": edge_stats,
+            "tags": tag_stats,
             "source_note": node_id,
         }
 
+    # Backward compatibility alias
+    source_note = sync_note_from_file
+
     def _determine_node_type(self, note: ParsedNote) -> str:
-        """Determine node type from frontmatter or default to Note."""
+        """Determine canonical node type from frontmatter or default to Note."""
         if "type" in note.frontmatter:
-            return note.frontmatter["type"]
+            raw_type = str(note.frontmatter["type"])
+            for node_type in NodeType:
+                if node_type.value.lower() == raw_type.lower():
+                    return node_type.value
         return NodeType.NOTE.value
 
     def _sync_wikilinks(self, node_id: str, wikilinks: list[str]) -> dict:
@@ -123,13 +129,18 @@ class NoteSynchronizer:
             stats["removed"] += 1
 
         for target_name in to_add:
-            matches = self.storage.find_nodes(target_name, match_type="exact")
-            if matches:
-                target_id = matches[0]["id"]
-            else:
-                target_type = NodeType.NOTE.value
-                target_id = generate_node_id(target_type, target_name)
-                if not self.storage.get_node(target_id):
+            target_type = NodeType.NOTE.value
+            target_id = generate_node_id(target_type, target_name)
+
+            if not self.storage.get_node(target_id):
+                matches = self.storage.find_nodes(
+                    target_name,
+                    node_type=NodeType.NOTE.value,
+                    match_type="exact",
+                )
+                if matches:
+                    target_id = matches[0]["id"]
+                else:
                     self.storage.add_node(
                         target_type, target_id, target_name, {"placeholder": True}
                     )
@@ -141,19 +152,63 @@ class NoteSynchronizer:
 
         return stats
 
+    def _sync_tags(self, node_id: str, tags: list[str]) -> dict:
+        """Diff and sync tag relationships for a note.
+
+        Ensures Tag nodes exist and TAGGED_WITH edges are current.
+        """
+        stats = {"added": 0, "removed": 0, "kept": 0}
+
+        # Get current TAGGED_WITH edges from this node
+        # Note: TAGGED_WITH edges don't necessarily need source_note property
+        # because they are intrinsic to the note's content.
+        current_edges = self.storage.get_neighbors(
+            node_id, direction="out", edge_types=[EdgeType.TAGGED_WITH.value]
+        )
+
+        current_tags: dict[str, str] = {}
+        for neighbor in current_edges:
+            # neighbor structure: {node: {name: "tagname", ...}, edge_id: "...", ...}
+            tag_name = neighbor["node"].get("name")
+            if tag_name:
+                current_tags[tag_name] = neighbor["edge_id"]
+
+        desired_tags = set(tags)
+        existing_tag_names = set(current_tags.keys())
+
+        to_add = desired_tags - existing_tag_names
+        to_remove = existing_tag_names - desired_tags
+        to_keep = desired_tags & existing_tag_names
+
+        stats["kept"] = len(to_keep)
+
+        for tag_name in to_remove:
+            edge_id = current_tags[tag_name]
+            self.storage.delete_edge(edge_id)
+            stats["removed"] += 1
+
+        for tag_name in to_add:
+            tag_id = generate_node_id(NodeType.TAG.value, tag_name)
+
+            if not self.storage.get_node(tag_id):
+                self.storage.add_node(NodeType.TAG.value, tag_id, tag_name)
+
+            self.storage.add_edge(
+                node_id,
+                tag_id,
+                EdgeType.TAGGED_WITH.value,
+                {"confidence": 1.0},
+            )
+            stats["added"] += 1
+
+        return stats
+
     def _update_embedding(self, node_id: str, node_type: str, note: ParsedNote):
-        """Update vector store embedding."""
+        """Store embedding on the Neo4j node."""
         text = f"# {note.title}\n\n"
         if note.tags:
             text += f"Tags: {', '.join(note.tags)}\n"
         text += f"{note.content}"
 
         embedding = self.embedder.embed(text)
-
-        self.vectors.add_entity(
-            node_id=node_id,
-            node_type=node_type,
-            name=note.title,
-            summary=note.content[:1000],  # Store first 1k chars as summary
-            embedding=embedding,
-        )
+        self.storage.set_embedding(node_id, embedding)
