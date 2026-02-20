@@ -12,6 +12,7 @@ from .graph.neo4j_storage import Neo4jStorage
 from .graph.routing_text import build_routing_text
 from .graph.schema import get_node_types
 from .vector.embedder import Embedder
+from .retrieval.pipeline import recall_structured
 
 
 @click.group()
@@ -85,6 +86,79 @@ def search(query: str, uri: str, user: str, password: str, limit: int):
             click.echo()
     finally:
         storage.close()
+
+
+@cli.command()
+@click.argument("query", type=str)
+@click.option("--uri", default="bolt://localhost:7687", help="Neo4j URI")
+@click.option("--user", default="neo4j", help="Neo4j username")
+@click.option("--password", default="obsidian", help="Neo4j password")
+@click.option(
+    "--mode",
+    type=click.Choice(["pull", "push"]),
+    default="pull",
+    show_default=True,
+    help="Token budget profile",
+)
+@click.option(
+    "--depth",
+    type=int,
+    default=1,
+    show_default=True,
+    help="Neighborhood traversal depth (1-2)",
+)
+@click.option(
+    "--limit",
+    "-n",
+    type=int,
+    default=10,
+    show_default=True,
+    help="Max matched nodes shown",
+)
+@click.option("--debug", is_flag=True, help="Print retrieval metrics")
+def recall(
+    query: str,
+    uri: str,
+    user: str,
+    password: str,
+    mode: str,
+    depth: int,
+    limit: int,
+    debug: bool,
+):
+    """Recall deterministic graph context for a query."""
+    storage = Neo4jStorage(uri=uri, user=user, password=password)
+    emb = Embedder()
+
+    try:
+        result = recall_structured(
+            query,
+            mode=mode,
+            depth=depth,
+            limit=limit,
+            storage=storage,
+            embedder=emb,
+        )
+    finally:
+        storage.close()
+
+    click.echo(result["markdown"])
+    if debug:
+        metrics = result["retrieval"]
+        click.echo()
+        click.echo(
+            " ".join(
+                [
+                    f"vector_hits={metrics['vector_hits']}",
+                    f"keyword_hits={metrics['keyword_hits']}",
+                    f"anchors={metrics['anchor_count']}",
+                    f"connections={metrics['connection_count']}",
+                    f"notes={metrics['note_count']}",
+                    f"truncated={','.join(metrics['truncated_sections']) or 'none'}",
+                    f"error_stage={metrics['error_stage'] or 'none'}",
+                ]
+            )
+        )
 
 
 @cli.command("re-embed")

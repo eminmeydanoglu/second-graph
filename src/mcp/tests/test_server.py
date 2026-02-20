@@ -132,6 +132,88 @@ class _FakeEmbedder:
         return [0.1] * 384
 
 
+class _RecallStorage:
+    def search_similar(self, query_embedding, node_types=None, limit: int = 10):
+        return [
+            {
+                "node_id": "goal:deterministic_renderer",
+                "node_type": "Goal",
+                "name": "Deterministic Renderer",
+                "summary": "Build stable recall output",
+                "score": 0.91,
+            },
+            {
+                "node_id": "note:renderer_plan",
+                "node_type": "Note",
+                "name": "Renderer Plan",
+                "summary": "Implementation details",
+                "score": 0.82,
+            },
+        ]
+
+    def find_nodes(self, name, node_type=None, match_type: str = "contains"):
+        return [
+            {
+                "id": "goal:deterministic_renderer",
+                "name": "Deterministic Renderer",
+                "summary": "Build stable recall output",
+                "_labels": ["Goal"],
+            },
+            {
+                "id": "note:renderer_plan",
+                "name": "Renderer Plan",
+                "summary": "Implementation details",
+                "_labels": ["Note"],
+            },
+        ]
+
+    def get_neighbors(
+        self, node_id, direction: str = "both", edge_types=None, depth: int = 1
+    ):
+        if node_id == "goal:deterministic_renderer":
+            return [
+                {
+                    "node": {
+                        "id": "note:renderer_plan",
+                        "name": "Renderer Plan",
+                        "_labels": ["Note"],
+                    },
+                    "relation": "related_to",
+                    "direction": "out",
+                }
+            ]
+        return []
+
+
+class TestRecallTool:
+    def test_recall_returns_markdown_contract(self, monkeypatch):
+        monkeypatch.setattr(mcp_server, "storage", _RecallStorage())
+        monkeypatch.setattr(mcp_server, "embedder", _FakeEmbedder())
+
+        result = mcp_server.recall("deterministic renderer", depth=1, limit=5)
+
+        assert result["success"] is True
+        assert "## Matched Nodes" in result["markdown"]
+        assert "## Connections" in result["markdown"]
+        assert "## Related Notes" in result["markdown"]
+        assert result["retrieval"]["vector_hits"] == 2
+
+    def test_recall_can_include_debug_payload(self, monkeypatch):
+        monkeypatch.setattr(mcp_server, "storage", _RecallStorage())
+        monkeypatch.setattr(mcp_server, "embedder", _FakeEmbedder())
+
+        result = mcp_server.recall(
+            "deterministic renderer",
+            depth=1,
+            limit=5,
+            include_debug=True,
+        )
+
+        assert result["success"] is True
+        assert "debug" in result
+        assert "matched_nodes" in result["debug"]
+
+
 class _LeakyStorage:
     """Storage stub that intentionally leaks internal vector fields."""
 

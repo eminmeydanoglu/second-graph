@@ -21,6 +21,7 @@ from ..graph.sync import NoteSynchronizer
 from ..vector.store import VectorStore
 from ..vector.embedder import Embedder
 from ..extraction.tracker import NoteTracker
+from ..retrieval.pipeline import recall_structured
 
 mcp = FastMCP(
     "Graph Manipulator",
@@ -441,6 +442,63 @@ def search_entities(
     return _strip_internal_dict(
         {"success": True, "count": len(results), "entities": results}
     )
+
+
+@mcp.tool()
+def recall(
+    query: str,
+    depth: int = 1,
+    limit: int = 10,
+    mode: str = "pull",
+    include_debug: bool = False,
+) -> dict:
+    """Deterministic graph recall with strict markdown contract.
+
+    Args:
+        query: Natural language query
+        depth: Graph traversal depth (1-2)
+        limit: Max matched nodes in the rendered output
+        mode: "pull" or "push" token budget profile
+        include_debug: Include structured payload alongside markdown
+
+    Returns:
+        Dict with markdown and retrieval metadata
+    """
+    db = _require_storage()
+    emb = _require_embedder()
+
+    normalized_mode = "push" if mode == "push" else "pull"
+    try:
+        result = recall_structured(
+            query,
+            mode=normalized_mode,
+            depth=depth,
+            limit=limit,
+            storage=db,
+            embedder=emb,
+        )
+    except Exception as exc:
+        return {"success": False, "error": f"recall_failed: {exc}"}
+
+    response = {
+        "success": True,
+        "markdown": result["markdown"],
+        "retrieval": result["retrieval"],
+    }
+
+    if include_debug:
+        response["debug"] = {
+            "query": result["query"],
+            "mode": result["mode"],
+            "depth": result["depth"],
+            "limit": result["limit"],
+            "warnings": result.get("warnings", []),
+            "matched_nodes": result.get("matched_nodes", []),
+            "connections": result.get("connections", []),
+            "related_notes": result.get("related_notes", []),
+        }
+
+    return _strip_internal_dict(response)
 
 
 @mcp.tool()
