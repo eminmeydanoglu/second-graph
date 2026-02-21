@@ -45,7 +45,6 @@ tracker: NoteTracker | None = None
 ROUTING_FIELDS = {
     "summary",
     "name",
-    "title",
     "tags",
     "domain",
     "status",

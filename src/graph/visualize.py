@@ -115,7 +115,7 @@ def create_web_visualization(
     # Add nodes
     for node_id, data in nodes_to_add:
         node_type = data.get("type", "Note")
-        title = data.get("title", data.get("name", node_id))
+        title = data.get("name", node_id)
 
         # Create hover tooltip
         tooltip = f"<b>{title}</b><br>Type: {node_type}"

@@ -24,7 +24,7 @@ class NeighborStorage(Protocol):
 def _node_name(node: dict | None, default: str) -> str:
     if not isinstance(node, dict):
         return default
-    for key in ("name", "title", "id"):
+    for key in ("name", "id"):
         value = node.get(key)
         if isinstance(value, str) and value.strip():
             return normalize_whitespace(value)
@@ -79,7 +79,7 @@ def _connection_sort_key(
 
 
 def _note_sort_key(note: RelatedNote) -> tuple[float, str, str]:
-    return (-note.score, note.note_id, note.title)
+    return (-note.score, note.note_id, note.name)
 
 
 def expand_from_anchors_with_hops(
@@ -112,7 +112,7 @@ def expand_from_anchors_with_hops(
                 note_map.get(anchor.node_id),
                 RelatedNote(
                     note_id=anchor.node_id,
-                    title=anchor.name,
+                    name=anchor.name,
                     reason="anchor",
                     score=anchor.final_score,
                 ),
@@ -222,7 +222,7 @@ def expand_from_anchors_with_hops(
                         note_map.get(neighbor_id),
                         RelatedNote(
                             note_id=neighbor_id,
-                            title=to_name,
+                            name=to_name,
                             reason="neighbor",
                             score=rank_score,
                         ),

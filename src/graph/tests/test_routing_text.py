@@ -7,7 +7,7 @@ def test_note_with_summary():
     text = build_routing_text(
         "Note",
         {
-            "title": "Mimetic Theory",
+            "name": "Mimetic Theory",
             "summary": "Core concepts by Girard",
             "tags": ["philosophy"],
         },
@@ -19,7 +19,7 @@ def test_note_without_summary():
     text = build_routing_text(
         "Note",
         {
-            "title": "Mimetic Theory",
+            "name": "Mimetic Theory",
             "tags": ["philosophy"],
         },
     )

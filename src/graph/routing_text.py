@@ -58,8 +58,8 @@ def build_routing_text(node_type: str, props: dict[str, Any] | None) -> str:
     tags = _normalize_tags(data.get("tags"))
 
     if canonical_type == "Note":
-        title = _string(data.get("title")) or name
-        parts = [f"Note: {title}"]
+        note_name = name
+        parts = [f"Note: {note_name}"]
         if summary:
             parts.append(summary)
         if tags:

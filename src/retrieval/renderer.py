@@ -7,7 +7,7 @@ from .tokenize import normalize_whitespace
 from .types import RankedConnection, RelatedNote, ScoredNode
 
 _MAX_NAME_LEN = 120
-_MAX_TITLE_LEN = 120
+_MAX_NOTE_NAME_LEN = 120
 _MAX_SUMMARY_LEN = 180
 
 
@@ -52,9 +52,9 @@ def _format_connection(connection: RankedConnection) -> str:
 
 def _format_note(note: RelatedNote) -> str:
     note_id = _sanitize_field(note.note_id, max_len=160)
-    title = _sanitize_field(note.title, max_len=_MAX_TITLE_LEN)
+    name = _sanitize_field(note.name, max_len=_MAX_NOTE_NAME_LEN)
     reason = _sanitize_field(note.reason, max_len=32)
-    return f"- {note_id} | {title} | reason={reason} | score={note.score:.4f}"
+    return f"- {note_id} | {name} | reason={reason} | score={note.score:.4f}"
 
 
 def _truncate_section(lines: list[str], token_budget: int) -> tuple[list[str], int]:

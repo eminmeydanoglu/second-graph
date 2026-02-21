@@ -85,7 +85,7 @@ And a link to [[New Concept]].
         if not isinstance(storage, Mock):
             node = storage.get_node("concept:new_idea")
             assert node is not None
-            assert node["node"]["title"] == "New Idea"
+            assert node["node"]["name"] == "New Idea"
             assert "idea" in node["node"]["tags"]
 
             neighbors = storage.get_neighbors("concept:new_idea", direction="out")

@@ -54,11 +54,12 @@ class NoteSynchronizer:
         node_type = self._determine_node_type(note)
         node_id = generate_node_id(node_type, note.title)
 
+        frontmatter = {k: v for k, v in note.frontmatter.items() if k != "title"}
+
         props = {
             "path": str(path),
-            "title": note.title,
             "modified_at": path.stat().st_mtime,
-            **note.frontmatter,
+            **frontmatter,
             "placeholder": False,
         }
 
@@ -207,10 +208,10 @@ class NoteSynchronizer:
 
     def _update_embedding(self, node_id: str, node_type: str, note: ParsedNote):
         """Store embedding on the Neo4j node."""
+        frontmatter = {k: v for k, v in note.frontmatter.items() if k != "title"}
         props = {
-            **note.frontmatter,
+            **frontmatter,
             "name": note.title,
-            "title": note.title,
             "tags": note.tags,
         }
         text = build_routing_text(node_type, props)

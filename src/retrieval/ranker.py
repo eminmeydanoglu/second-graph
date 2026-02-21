@@ -41,7 +41,7 @@ def canonical_node_type_from_labels(labels: list[str] | None) -> str:
 
 
 def _display_name(raw: dict) -> str:
-    for key in ("name", "title", "id", "node_id"):
+    for key in ("name", "id", "node_id"):
         value = raw.get(key)
         if isinstance(value, str) and value.strip():
             return normalize_whitespace(value)

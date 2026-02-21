@@ -32,7 +32,7 @@ class RankedConnection:
 @dataclass(frozen=True)
 class RelatedNote:
     note_id: str
-    title: str
+    name: str
     reason: str
     score: float
 

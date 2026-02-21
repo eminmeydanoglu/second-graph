@@ -98,9 +98,6 @@ class Neo4jStorage:
                         f"CREATE CONSTRAINT IF NOT EXISTS FOR (n:{label}) REQUIRE n.id IS UNIQUE"
                     )
                     session.run(
-                        f"CREATE INDEX IF NOT EXISTS FOR (n:{label}) ON (n.title)"
-                    )
-                    session.run(
                         f"CREATE INDEX IF NOT EXISTS FOR (n:{label}) ON (n.name)"
                     )
                 except Exception:
@@ -143,12 +140,8 @@ class Neo4jStorage:
             Node dict or None on failure
         """
         props = properties.copy() if properties else {}
-        canonical_name = name.strip()
-        props["name"] = canonical_name
-
-        title = props.get("title")
-        if title is None or (isinstance(title, str) and not title.strip()):
-            props["title"] = canonical_name
+        props.pop("title", None)
+        props["name"] = name.strip()
 
         sanitized_type = self._sanitize_label(node_type)
         now = datetime.now().isoformat()
@@ -280,12 +273,12 @@ class Neo4jStorage:
             Updated node dict or None if not found
         """
         props = properties.copy()
-        if "name" in props and (
-            "title" not in props
-            or props["title"] is None
-            or (isinstance(props["title"], str) and not props["title"].strip())
-        ):
-            props["title"] = props["name"]
+
+        props.pop("title", None)
+
+        if "name" in props and isinstance(props["name"], str):
+            props["name"] = props["name"].strip()
+
         props["updated_at"] = datetime.now().isoformat()
 
         with self.driver.session() as session:
@@ -924,8 +917,9 @@ class Neo4jStorage:
                     sanitized_labels = ["Concept"]
                 label_spec = ":".join(dict.fromkeys(sanitized_labels))
 
+                props.pop("title", None)
                 if not props.get("name"):
-                    props["name"] = props.get("title", node_id)
+                    props["name"] = node_id
                 props["id"] = node_id
 
                 tx.run(
