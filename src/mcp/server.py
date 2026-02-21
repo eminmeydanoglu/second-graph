@@ -57,6 +57,9 @@ ROUTING_FIELDS = {
     "intensity",
 }
 
+MENTIONS_EXCLUDED_RELATIONS = {"WIKILINK", "TAGGED_WITH", "MENTIONS"}
+MENTIONS_EXCLUDED_NODE_TYPES = {"Note", "Tag"}
+
 
 def init_server(
     neo4j_uri: str = "bolt://localhost:7687",
@@ -126,6 +129,93 @@ def _canonical_node_type_from_labels(labels: list[str]) -> str:
         if node_type in labels:
             return node_type
     return "Unknown"
+
+
+def _relation_key(relation: str) -> str:
+    return relation.strip().upper()
+
+
+def _extract_source_note(properties: dict | None) -> str | None:
+    if not properties:
+        return None
+    source_note = properties.get("source_note")
+    if not isinstance(source_note, str):
+        return None
+    normalized = source_note.strip()
+    return normalized if normalized else None
+
+
+def _maybe_backfill_mentions(
+    db: Neo4jStorage,
+    *,
+    relation: str,
+    properties: dict | None,
+    source_node: dict,
+    target_node: dict,
+) -> dict:
+    """Create Note->Entity MENTIONS edges from semantic edge provenance."""
+    relation_key = _relation_key(relation)
+    if relation_key in MENTIONS_EXCLUDED_RELATIONS:
+        return {"created": 0, "targets": [], "warnings": []}
+
+    source_note = _extract_source_note(properties)
+    if not source_note:
+        return {"created": 0, "targets": [], "warnings": []}
+
+    source_note_node = db.get_node(source_note)
+    if not source_note_node:
+        return {
+            "created": 0,
+            "targets": [],
+            "warnings": [f"source_note_not_found:{source_note}"],
+        }
+
+    source_note_type = _canonical_node_type_from_labels(
+        source_note_node["node"].get("_labels", [])
+    )
+    if source_note_type != "Note":
+        return {
+            "created": 0,
+            "targets": [],
+            "warnings": [f"source_note_not_note_type:{source_note_type}"],
+        }
+
+    endpoint_nodes = [source_node, target_node]
+    mention_targets: list[str] = []
+    warnings: list[str] = []
+
+    for endpoint in endpoint_nodes:
+        endpoint_props = endpoint["node"]
+        endpoint_id = endpoint_props.get("id")
+        if not isinstance(endpoint_id, str) or not endpoint_id:
+            continue
+        if endpoint_id == source_note:
+            continue
+
+        endpoint_type = _canonical_node_type_from_labels(
+            endpoint_props.get("_labels", [])
+        )
+        if endpoint_type in MENTIONS_EXCLUDED_NODE_TYPES:
+            continue
+
+        mention_result = db.add_edge(
+            source_note,
+            endpoint_id,
+            "MENTIONS",
+            properties={"source_note": source_note},
+        )
+        if mention_result.get("success"):
+            mention_targets.append(endpoint_id)
+        else:
+            warnings.append(
+                f"mentions_add_failed:{source_note}->{endpoint_id}:{mention_result.get('error', 'unknown')}"
+            )
+
+    return {
+        "created": len(set(mention_targets)),
+        "targets": sorted(set(mention_targets)),
+        "warnings": warnings,
+    }
 
 
 @mcp.tool()
@@ -316,8 +406,26 @@ def add_edge(
         return {"success": False, "errors": validation.errors}
 
     result = db.add_edge(from_id, to_id, relation, properties)
+
+    mentions_info = _maybe_backfill_mentions(
+        db,
+        relation=relation,
+        properties=properties,
+        source_node=source_node,
+        target_node=target_node,
+    )
+
+    warnings = []
     if validation.warnings:
-        result["warnings"] = validation.warnings
+        warnings.extend(validation.warnings)
+    warnings.extend(mentions_info["warnings"])
+
+    result["mentions_added"] = mentions_info["created"]
+    if mentions_info["targets"]:
+        result["mention_targets"] = mentions_info["targets"]
+    if warnings:
+        result["warnings"] = warnings
+
     return result
 
 

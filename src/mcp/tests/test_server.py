@@ -20,6 +20,21 @@ class _FakeStorage:
 
     def get_node(self, node_id: str) -> dict | None:
         """Return a fake node for validation tests."""
+        if node_id.startswith("note:"):
+            return {
+                "node": {"_labels": ["Note"], "id": node_id, "name": "Fake Note"},
+                "connections": [],
+            }
+        if node_id.startswith("concept:"):
+            return {
+                "node": {"_labels": ["Concept"], "id": node_id, "name": "Fake Concept"},
+                "connections": [],
+            }
+        if node_id.startswith("value:"):
+            return {
+                "node": {"_labels": ["Value"], "id": node_id, "name": "Fake Value"},
+                "connections": [],
+            }
         if node_id.startswith("goal:"):
             return {
                 "node": {"_labels": ["Goal"], "id": node_id, "name": "Fake"},
@@ -125,6 +140,113 @@ class TestStrictValidation:
 
         result = mcp_server.add_edge("person:x", "goal:y", "HAS_GOAL")
         assert result["success"] is True
+
+    def test_add_edge_backfills_mentions_from_source_note(self, monkeypatch):
+        """Semantic edge with source_note should add Note->Entity MENTIONS edges."""
+
+        class _MentionsStorage(_FakeStorage):
+            def __init__(self):
+                self.calls = []
+
+            def add_edge(
+                self, from_id, to_id, relation, properties=None, source_note=None
+            ):
+                self.calls.append((from_id, to_id, relation, properties, source_note))
+                return {
+                    "success": True,
+                    "edge_id": "edge:fake",
+                    "from_id": from_id,
+                    "to_id": to_id,
+                    "relation": relation,
+                    "from_name": "F",
+                    "to_name": "T",
+                }
+
+        storage = _MentionsStorage()
+        monkeypatch.setattr(mcp_server, "storage", storage)
+
+        result = mcp_server.add_edge(
+            "person:melih",
+            "concept:doğa",
+            "INTERESTED_IN",
+            properties={"source_note": "note:markdown/melihi_rahatlatmak"},
+        )
+
+        assert result["success"] is True
+        assert result["mentions_added"] == 2
+
+        mention_calls = [c for c in storage.calls if c[2] == "MENTIONS"]
+        assert len(mention_calls) == 2
+        mention_pairs = {(c[0], c[1]) for c in mention_calls}
+        assert (
+            "note:markdown/melihi_rahatlatmak",
+            "person:melih",
+        ) in mention_pairs
+        assert (
+            "note:markdown/melihi_rahatlatmak",
+            "concept:doğa",
+        ) in mention_pairs
+
+    def test_add_edge_skips_mentions_for_wikilink(self, monkeypatch):
+        """WIKILINK edges should not trigger MENTIONS backfill."""
+
+        class _NoMentionsStorage(_FakeStorage):
+            def __init__(self):
+                self.calls = []
+
+            def add_edge(
+                self, from_id, to_id, relation, properties=None, source_note=None
+            ):
+                self.calls.append((from_id, to_id, relation, properties, source_note))
+                return {
+                    "success": True,
+                    "edge_id": "edge:fake",
+                    "from_id": from_id,
+                    "to_id": to_id,
+                    "relation": relation,
+                    "from_name": "F",
+                    "to_name": "T",
+                }
+
+        storage = _NoMentionsStorage()
+        monkeypatch.setattr(mcp_server, "storage", storage)
+
+        result = mcp_server.add_edge(
+            "note:a",
+            "note:b",
+            "wikilink",
+            properties={"source_note": "note:a"},
+        )
+
+        assert result["success"] is True
+        assert result["mentions_added"] == 0
+        mention_calls = [c for c in storage.calls if c[2] == "MENTIONS"]
+        assert len(mention_calls) == 0
+
+    def test_add_edge_warns_when_source_note_missing(self, monkeypatch):
+        """Invalid source_note should not fail add_edge but should warn."""
+
+        class _MissingSourceStorage(_FakeStorage):
+            def get_node(self, node_id: str) -> dict | None:
+                if node_id == "note:missing":
+                    return None
+                return super().get_node(node_id)
+
+        monkeypatch.setattr(mcp_server, "storage", _MissingSourceStorage())
+
+        result = mcp_server.add_edge(
+            "person:melih",
+            "concept:doğa",
+            "INTERESTED_IN",
+            properties={"source_note": "note:missing"},
+        )
+
+        assert result["success"] is True
+        assert result["mentions_added"] == 0
+        assert any(
+            "source_note_not_found:note:missing" in warning
+            for warning in result.get("warnings", [])
+        )
 
 
 class _FakeEmbedder:
