@@ -59,6 +59,7 @@ class NoteSynchronizer:
             "title": note.title,
             "modified_at": path.stat().st_mtime,
             **note.frontmatter,
+            "placeholder": False,
         }
 
         existing = self.storage.get_node(node_id)

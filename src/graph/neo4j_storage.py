@@ -143,7 +143,12 @@ class Neo4jStorage:
             Node dict or None on failure
         """
         props = properties.copy() if properties else {}
-        props["name"] = name
+        canonical_name = name.strip()
+        props["name"] = canonical_name
+
+        title = props.get("title")
+        if title is None or (isinstance(title, str) and not title.strip()):
+            props["title"] = canonical_name
 
         sanitized_type = self._sanitize_label(node_type)
         now = datetime.now().isoformat()
@@ -275,6 +280,12 @@ class Neo4jStorage:
             Updated node dict or None if not found
         """
         props = properties.copy()
+        if "name" in props and (
+            "title" not in props
+            or props["title"] is None
+            or (isinstance(props["title"], str) and not props["title"].strip())
+        ):
+            props["title"] = props["name"]
         props["updated_at"] = datetime.now().isoformat()
 
         with self.driver.session() as session:
