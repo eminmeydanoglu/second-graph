@@ -57,7 +57,7 @@ class TestVaultScanner:
     def test_scan_vault_handles_errors(self, scanner, synchronizer, vault_path):
         """Scanner should count errors and continue."""
 
-        def side_effect(path):
+        def side_effect(path, vault_root=None):
             if "Note2" in str(path):
                 return {"success": False, "error": "Fail"}
             return {"success": True, "action": "updated"}
@@ -75,7 +75,7 @@ class TestVaultScanner:
     def test_scan_vault_handles_exceptions(self, scanner, synchronizer, vault_path):
         """Scanner should catch exceptions and continue."""
 
-        def side_effect(path):
+        def side_effect(path, vault_root=None):
             if "Note1" in str(path):
                 raise ValueError("Crash")
             return {"success": True}

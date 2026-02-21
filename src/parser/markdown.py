@@ -67,13 +67,30 @@ def extract_wikilinks(content: str) -> list[str]:
         List of unique link targets (without display text)
     """
     matches = WIKILINK_PATTERN.findall(content)
+
     # Deduplicate while preserving order
     seen = set()
     unique = []
-    for link in matches:
+
+    for raw_link in matches:
+        link = raw_link.strip()
+
+        # [[Page#Heading]] / [[Page^block]] should resolve to Page node.
+        if "#" in link:
+            link = link.split("#", 1)[0].strip()
+        if "^" in link:
+            link = link.split("^", 1)[0].strip()
+
+        if link.lower().endswith(".md"):
+            link = link[:-3].strip()
+
+        if not link:
+            continue
+
         if link not in seen:
             seen.add(link)
             unique.append(link)
+
     return unique
 
 

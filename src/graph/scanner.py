@@ -40,7 +40,10 @@ class VaultScanner:
 
         for note_path in self._find_markdown_files(root):
             try:
-                result = self.synchronizer.sync_note_from_file(note_path)
+                result = self.synchronizer.sync_note_from_file(
+                    note_path,
+                    vault_root=root,
+                )
                 stats["processed"] += 1
 
                 if result.get("success"):

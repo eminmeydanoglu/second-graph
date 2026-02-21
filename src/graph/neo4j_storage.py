@@ -140,7 +140,6 @@ class Neo4jStorage:
             Node dict or None on failure
         """
         props = properties.copy() if properties else {}
-        props.pop("title", None)
         props["name"] = name.strip()
 
         sanitized_type = self._sanitize_label(node_type)
@@ -262,6 +261,102 @@ class Neo4jStorage:
                 nodes.append(self._clean_node(node_dict))
             return nodes
 
+    def find_note_by_vault_rel_path(self, rel_path: str) -> dict | None:
+        """Find a Note node by vault-relative path.
+
+        Args:
+            rel_path: Vault-relative path, with or without .md suffix
+
+        Returns:
+            Matching note node dict or None
+        """
+        normalized = rel_path.replace("\\", "/").strip().lstrip("./")
+        if normalized.lower().endswith(".md"):
+            normalized = normalized[:-3]
+
+        path_no_ext = normalized.lower()
+        path_with_ext = f"{path_no_ext}.md"
+        path_with_ext_suffix = f"/{path_with_ext}"
+
+        with self.driver.session() as session:
+            result = session.run(
+                """
+                MATCH (n)
+                WHERE (
+                        n.id STARTS WITH 'note:'
+                        OR n.path IS NOT NULL
+                      )
+                  AND (
+                        toLower(coalesce(n.vault_rel_path, '')) = $path_no_ext
+                        OR toLower(coalesce(n.vault_rel_path, '')) = $path_with_ext
+                        OR (
+                            n.path IS NOT NULL
+                            AND toLower(replace(n.path, '\\\\', '/')) ENDS WITH $path_with_ext_suffix
+                        )
+                  )
+                RETURN n, labels(n) as labels
+                ORDER BY CASE
+                    WHEN toLower(coalesce(n.vault_rel_path, '')) = $path_no_ext THEN 0
+                    WHEN toLower(coalesce(n.vault_rel_path, '')) = $path_with_ext THEN 1
+                    WHEN coalesce(n.placeholder, false) = false THEN 2
+                    ELSE 3
+                END
+                LIMIT 1
+                """,
+                path_no_ext=path_no_ext,
+                path_with_ext=path_with_ext,
+                path_with_ext_suffix=path_with_ext_suffix,
+            )
+            record = result.single()
+            if not record:
+                return None
+
+            node_dict = dict(record["n"])
+            node_dict["_labels"] = record["labels"]
+            return self._clean_node(node_dict)
+
+    def find_note_candidates_by_stem(self, stem: str, limit: int = 20) -> list[dict]:
+        """Find Note candidates by stem-like matching."""
+        normalized_stem = stem.replace("\\", "/").split("/")[-1].strip().lower()
+        if normalized_stem.endswith(".md"):
+            normalized_stem = normalized_stem[:-3]
+        stem_with_ext = f"{normalized_stem}.md"
+
+        with self.driver.session() as session:
+            result = session.run(
+                """
+                MATCH (n)
+                WHERE (
+                        n.id STARTS WITH 'note:'
+                        OR n.path IS NOT NULL
+                      )
+                  AND (
+                        toLower(coalesce(n.stem, '')) = $stem
+                        OR toLower(coalesce(n.name, '')) = $stem
+                        OR (
+                            n.path IS NOT NULL
+                            AND toLower(split(replace(n.path, '\\\\', '/'), '/')[-1]) = $stem_with_ext
+                        )
+                  )
+                RETURN n, labels(n) as labels
+                ORDER BY coalesce(n.placeholder, false) ASC,
+                         size(coalesce(n.vault_rel_path, '')) ASC,
+                         size(coalesce(n.name, '')) ASC
+                LIMIT $limit
+                """,
+                stem=normalized_stem,
+                stem_with_ext=stem_with_ext,
+                limit=limit,
+            )
+
+            nodes: list[dict] = []
+            for r in result:
+                node_dict = dict(r["n"])
+                node_dict["_labels"] = r["labels"]
+                nodes.append(self._clean_node(node_dict))
+
+            return nodes
+
     def update_node(self, node_id: str, properties: dict) -> dict | None:
         """Update node properties.
 
@@ -273,8 +368,6 @@ class Neo4jStorage:
             Updated node dict or None if not found
         """
         props = properties.copy()
-
-        props.pop("title", None)
 
         if "name" in props and isinstance(props["name"], str):
             props["name"] = props["name"].strip()

@@ -38,6 +38,8 @@ class TestNoteSynchronizer:
             mock.find_edges.return_value = []
             mock.get_edges_by_source_note.return_value = []
             mock.delete_edges_by_source_note.return_value = 0
+            mock.find_note_by_vault_rel_path.return_value = None
+            mock.find_note_candidates_by_stem.return_value = []
             mock.add_node.return_value = {"id": "mock"}
             mock.update_node.return_value = {"id": "mock"}
             mock.add_edge.return_value = {"success": True, "edge_id": "edge:mock"}
@@ -78,17 +80,17 @@ And a link to [[New Concept]].
 
         assert result["success"] is True
         assert result["action"] == "created"
-        assert result["node_id"] == "concept:new_idea"
+        assert result["node_id"] == "note:new_idea"
         assert result["edges"]["added"] == 2  # Two wikilinks
         # Tag sync now handled as graph edges
 
         if not isinstance(storage, Mock):
-            node = storage.get_node("concept:new_idea")
+            node = storage.get_node("note:new_idea")
             assert node is not None
             assert node["node"]["name"] == "New Idea"
             assert "idea" in node["node"]["tags"]
 
-            neighbors = storage.get_neighbors("concept:new_idea", direction="out")
+            neighbors = storage.get_neighbors("note:new_idea", direction="out")
             names = {n["node"]["name"] for n in neighbors}
             assert "Existing Concept" in names
             assert "New Concept" in names
@@ -128,7 +130,7 @@ Links: [[Person A]], [[Person C]]
             assert result["edges"]["added"] == 1
             assert result["edges"]["removed"] == 1
 
-            neighbors = storage.get_neighbors("project:project_alpha", direction="out")
+            neighbors = storage.get_neighbors("note:project_alpha", direction="out")
             names = {n["node"]["name"] for n in neighbors}
             assert "Person A" in names
             assert "Person C" in names
@@ -185,3 +187,55 @@ This body should never appear inside embedding payload.
         embed_text = embedder.embed.call_args[0][0]
         assert embed_text == "Note: Routing Text. Compact summary. Tags: memory"
         assert "never appear" not in embed_text
+
+    def test_sync_node_id_uses_relative_path(self, synchronizer, workspace):
+        """Node ID should be derived from vault-relative file path."""
+        nested = workspace / "Folder A" / "Nested Note.md"
+        nested.parent.mkdir(parents=True, exist_ok=True)
+        nested.write_text("# Nested Note")
+
+        result = synchronizer.sync_note_from_file(nested, vault_root=workspace)
+
+        assert result["success"] is True
+        assert result["node_id"] == "note:folder_a/nested_note"
+
+    def test_sync_wikilink_fragments_are_deduplicated(
+        self, synchronizer, workspace, storage
+    ):
+        """[[Target]] and [[Target#Heading]] should resolve to same edge target."""
+        note_path = workspace / "Fragments.md"
+        note_path.write_text(
+            """# Fragments
+
+[[Target]]
+[[Target#Heading]]
+[[Target^block-id]]
+"""
+        )
+
+        result = synchronizer.sync_note_from_file(note_path)
+
+        assert result["success"] is True
+        assert result["edges"]["added"] == 1
+
+    def test_sync_handles_nested_frontmatter_structures(
+        self, synchronizer, workspace, storage
+    ):
+        """Nested YAML structures should not crash Neo4j property writes."""
+        note_path = workspace / "Nested Frontmatter.md"
+        note_path.write_text(
+            """---
+matrix:
+  - [1, 2]
+  - [3, 4]
+metadata:
+  owner: emin
+  labels: [a, b]
+---
+# Nested Frontmatter
+"""
+        )
+
+        result = synchronizer.sync_note_from_file(note_path)
+
+        assert result["success"] is True
