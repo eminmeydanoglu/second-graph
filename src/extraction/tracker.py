@@ -46,9 +46,11 @@ class NoteTracker:
         Reads the file, hashes it, compares with stored hash.
 
         Returns:
-            - status="new": {status, content} — first extraction
-            - status="changed": {status, diff, content, last_extracted_at}
-            - status="unchanged": {status, last_extracted_at}
+            - status="needs_extraction", reason="first_extraction":
+              {status, reason, content}
+            - status="needs_extraction", reason="content_changed":
+              {status, reason, diff, content, last_extracted_at}
+            - status="ok": {status, last_extracted_at}
             - status="error": {status, error} — file not found, etc.
         """
         file_path = Path(path)
@@ -64,11 +66,15 @@ class NoteTracker:
         stored = self.vectors.get_extraction_status(path)
 
         if stored is None:
-            return {"status": "new", "content": content}
+            return {
+                "status": "needs_extraction",
+                "reason": "first_extraction",
+                "content": content,
+            }
 
         if stored["content_hash"] == current_hash:
             return {
-                "status": "unchanged",
+                "status": "ok",
                 "last_extracted_at": stored["extracted_at"],
             }
 
@@ -77,7 +83,8 @@ class NoteTracker:
         diff = self.make_diff(old_content, content, path)
 
         return {
-            "status": "changed",
+            "status": "needs_extraction",
+            "reason": "content_changed",
             "diff": diff,
             "content": content,
             "last_extracted_at": stored["extracted_at"],
@@ -140,12 +147,15 @@ class NoteTracker:
         }
 
     def list_pending_notes(self, vault_path: str) -> dict:
-        """List notes in vault that need extraction (new or changed).
+        """List notes in vault that need extraction.
 
         Iterates all markdown files, hashes each, compares with stored state.
 
         Returns:
-            Dict with pending list and unchanged_count.
+            Dict with pending list, pending_count, and ok_count.
+            Pending note entries have status="needs_extraction" with reason:
+            - first_extraction
+            - content_changed
         """
         vault = Path(vault_path)
         if not vault.is_dir():
@@ -155,7 +165,7 @@ class NoteTracker:
             }
 
         pending: list[dict] = []
-        unchanged_count = 0
+        ok_count = 0
 
         for note_path in iter_notes(vault):
             path_str = str(note_path)
@@ -169,15 +179,29 @@ class NoteTracker:
             stored = self.vectors.get_extraction_status(path_str)
 
             if stored is None:
-                pending.append({"path": path_str, "status": "new"})
+                pending.append(
+                    {
+                        "path": path_str,
+                        "status": "needs_extraction",
+                        "reason": "first_extraction",
+                    }
+                )
             elif stored["content_hash"] != current_hash:
-                pending.append({"path": path_str, "status": "changed"})
+                pending.append(
+                    {
+                        "path": path_str,
+                        "status": "needs_extraction",
+                        "reason": "content_changed",
+                    }
+                )
             else:
-                unchanged_count += 1
+                ok_count += 1
 
         return {
             "success": True,
             "pending": pending,
             "pending_count": len(pending),
-            "unchanged_count": unchanged_count,
+            "ok_count": ok_count,
+            # Backward compatibility for older callers
+            "unchanged_count": ok_count,
         }

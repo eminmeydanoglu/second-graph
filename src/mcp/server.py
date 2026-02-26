@@ -683,9 +683,11 @@ def check_note_status(path: str) -> dict:
         path: Absolute path to the markdown file
 
     Returns:
-        - status="new": {status, content} — never extracted before
-        - status="changed": {status, diff, content, last_extracted_at} — content changed
-        - status="unchanged": {status, last_extracted_at} — skip, no changes
+        - status="needs_extraction", reason="first_extraction":
+          {status, reason, content}
+        - status="needs_extraction", reason="content_changed":
+          {status, reason, diff, content, last_extracted_at}
+        - status="ok": {status, last_extracted_at} — skip, no changes
         - status="error": {status, error} — file not found or read error
     """
     t = _require_tracker()
@@ -721,7 +723,8 @@ def list_pending_notes(vault_path: str) -> dict:
         vault_path: Absolute path to the Obsidian vault root
 
     Returns:
-        Dict with pending list [{path, status}], pending_count, unchanged_count
+        Dict with pending list [{path, status="needs_extraction", reason}],
+        pending_count, ok_count
     """
     t = _require_tracker()
     return t.list_pending_notes(vault_path)

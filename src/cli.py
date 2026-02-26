@@ -269,11 +269,12 @@ def list_pending(vault_path: Path, db: Path, format: str):
             click.echo(note["path"])
     else:
         click.echo(
-            f"Pending: {result['pending_count']}  Unchanged: {result['unchanged_count']}"
+            f"Needs extraction: {result['pending_count']}  OK: {result['ok_count']}"
         )
         for note in result["pending"]:
-            status = "NEW" if note["status"] == "new" else "CHG"
-            click.echo(f"  [{status}] {note['path']}")
+            reason = note.get("reason", "")
+            label = "FIRST" if reason == "first_extraction" else "CHANGED"
+            click.echo(f"  [NEEDS_EXTRACT/{label}] {note['path']}")
 
 
 @cli.command("graph-snapshot")

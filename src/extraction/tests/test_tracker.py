@@ -82,7 +82,8 @@ class TestCheckNoteStatus:
         note.write_text("# New\nBrand new content.", encoding="utf-8")
 
         result = tracker.check_note_status(str(note))
-        assert result["status"] == "new"
+        assert result["status"] == "needs_extraction"
+        assert result["reason"] == "first_extraction"
         assert "# New" in result["content"]
 
     def test_file_not_found(self, tracker):
@@ -97,7 +98,7 @@ class TestCheckNoteStatus:
         tracker.mark_extracted(str(note))
         result = tracker.check_note_status(str(note))
 
-        assert result["status"] == "unchanged"
+        assert result["status"] == "ok"
         assert "last_extracted_at" in result
 
     def test_changed_after_modify(self, tracker, tmp_path):
@@ -108,7 +109,8 @@ class TestCheckNoteStatus:
         note.write_text("modified content\n", encoding="utf-8")
 
         result = tracker.check_note_status(str(note))
-        assert result["status"] == "changed"
+        assert result["status"] == "needs_extraction"
+        assert result["reason"] == "content_changed"
         assert "diff" in result
         assert "content" in result
         assert "-original content" in result["diff"]
@@ -178,9 +180,11 @@ class TestListPendingNotes:
         result = tracker.list_pending_notes(str(sample_vault))
         assert result["success"] is True
         assert result["pending_count"] == 2
-        assert result["unchanged_count"] == 0
+        assert result["ok_count"] == 0
         statuses = {p["status"] for p in result["pending"]}
-        assert statuses == {"new"}
+        reasons = {p["reason"] for p in result["pending"]}
+        assert statuses == {"needs_extraction"}
+        assert reasons == {"first_extraction"}
 
     def test_invalid_vault_path(self, tracker):
         result = tracker.list_pending_notes("/nonexistent/vault")
@@ -193,7 +197,7 @@ class TestListPendingNotes:
 
         result = tracker.list_pending_notes(str(sample_vault))
         assert result["pending_count"] == 0
-        assert result["unchanged_count"] == 2
+        assert result["ok_count"] == 2
 
     def test_detect_changed(self, tracker, sample_vault):
         # Extract all
@@ -206,8 +210,9 @@ class TestListPendingNotes:
 
         result = tracker.list_pending_notes(str(sample_vault))
         assert result["pending_count"] == 1
-        assert result["unchanged_count"] == 1
-        assert result["pending"][0]["status"] == "changed"
+        assert result["ok_count"] == 1
+        assert result["pending"][0]["status"] == "needs_extraction"
+        assert result["pending"][0]["reason"] == "content_changed"
 
     def test_excludes_obsidian_dirs(self, tracker, sample_vault):
         result = tracker.list_pending_notes(str(sample_vault))
