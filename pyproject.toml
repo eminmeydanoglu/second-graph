@@ -30,9 +30,9 @@ obsidian-brain = "src.cli:cli"
 obsidian-brain-mcp = "src.mcp:main"
 
 [tool.setuptools]
-packages = ["src", "src.graph", "src.graph.tests", "src.parser", "src.parser.tests", "src.vector", "src.vector.tests", "src.extraction", "src.extraction.tests", "src.mcp", "src.mcp.tests"]
+packages = ["src", "src.graph", "src.graph.tests", "src.parser", "src.parser.tests", "src.vector", "src.vector.tests", "src.extraction", "src.extraction.tests", "src.mcp", "src.mcp.tests", "src.retrieval", "src.retrieval.tests"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
-testpaths = ["src/graph/tests", "src/vector/tests", "src/mcp/tests", "src/parser/tests", "src/extraction/tests"]
+testpaths = ["src/graph/tests", "src/vector/tests", "src/mcp/tests", "src/parser/tests", "src/extraction/tests", "src/retrieval/tests"]
 asyncio_mode = "auto"
