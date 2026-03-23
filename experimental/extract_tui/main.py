@@ -13,6 +13,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from experimental.extract_tui.core import (  # noqa: E402
+    create_quick_test_note,
     DEFAULT_AGENT,
     DEFAULT_DB,
     DEFAULT_MODEL,
@@ -27,6 +28,7 @@ from experimental.extract_tui.core import (  # noqa: E402
     make_run_log_dir,
     relative_path,
     run_extraction_once,
+    reset_tracker_db,
     safe_log_name,
     select_first_n,
     selected_count,
@@ -60,13 +62,24 @@ class ExtractTUI:
         self.vault_path = vault_path
         self.db_path = db_path
 
-        self.summary = VaultSummary(total=0, pending=0, unchanged=0, new=0, changed=0)
+        self.summary = VaultSummary(
+            total=0,
+            needs_extraction=0,
+            ok=0,
+            first_extraction=0,
+            content_changed=0,
+        )
         self.rows: list[NoteRow] = []
         self.cursor = 0
         self.top = 0
         self.notice = ""
         self.last_run_dir: Path | None = None
         self.use_colors = False
+        self.last_failed_paths: list[str] = []
+        self.command_center_lines: list[str] = [
+            "No command executed yet.",
+            "Press e to run extraction for selected notes.",
+        ]
 
         self.agents = discover_agents(repo_root)
         self.models = discover_models(repo_root)
@@ -106,6 +119,29 @@ class ExtractTUI:
     def _label_value(self, label: str, value: str) -> str:
         return f"{label}:{value}"
 
+    @staticmethod
+    def _tail_lines(text: str, limit: int = 6) -> list[str]:
+        if not text:
+            return []
+        lines = [line for line in text.splitlines() if line.strip()]
+        if not lines:
+            return []
+        return lines[-limit:]
+
+    def _set_command_center(self, lines: list[str]) -> None:
+        cleaned = [line.rstrip() for line in lines if line is not None]
+        self.command_center_lines = cleaned if cleaned else ["(no output)"]
+
+    def _command_center_height(self, terminal_height: int) -> int:
+        if terminal_height >= 32:
+            return 8
+        if terminal_height >= 24:
+            return 6
+        return 4
+
+    def _footer_reserved_lines(self, terminal_height: int) -> int:
+        return self._command_center_height(terminal_height) + 3
+
     def refresh_rows(self, *, initial: bool = False) -> None:
         previous = {row.path for row in self.rows if row.selected}
         self.summary, new_rows = load_pending_rows(self.vault_path, self.db_path)
@@ -123,6 +159,29 @@ class ExtractTUI:
 
         if not initial:
             self.set_notice("Refreshed vault state")
+
+    def quick_create_note(self) -> None:
+        note_path = create_quick_test_note(self.vault_path)
+        self.refresh_rows(initial=True)
+        note_path_str = str(note_path)
+        for idx, row in enumerate(self.rows):
+            if row.path == note_path_str:
+                row.selected = True
+                self.cursor = idx
+                self.top = min(self.top, self.cursor)
+                break
+        rel = relative_path(note_path_str, self.vault_path)
+        self.set_notice(f"Created test note: {rel}")
+
+    def reset_db(self, stdscr: curses.window) -> None:
+        confirm = self._prompt(stdscr, "Type RESET to clear tracker DB", "")
+        if confirm != "RESET":
+            self.set_notice("DB reset cancelled")
+            return
+        resolved = reset_tracker_db(self.db_path)
+        self.last_failed_paths = []
+        self.refresh_rows(initial=True)
+        self.set_notice(f"Tracker DB reset: {resolved}")
 
     def move_cursor(self, delta: int) -> None:
         if not self.rows:
@@ -221,9 +280,10 @@ class ExtractTUI:
         stats = "  ".join(
             [
                 self._label_value("total", str(self.summary.total)),
-                self._label_value("pending", str(self.summary.pending)),
-                self._label_value("new", str(self.summary.new)),
-                self._label_value("changed", str(self.summary.changed)),
+                self._label_value("needs", str(self.summary.needs_extraction)),
+                self._label_value("first", str(self.summary.first_extraction)),
+                self._label_value("changed", str(self.summary.content_changed)),
+                self._label_value("ok", str(self.summary.ok)),
                 self._label_value("selected", str(selected)),
             ]
         )
@@ -239,13 +299,17 @@ class ExtractTUI:
 
         stdscr.hline(4, 0, curses.ACS_HLINE, max(1, width - 1))
         stdscr.addnstr(
-            5, 0, "Sel  St   Last Extracted             Note", width - 1, self._attr(1)
+            5,
+            0,
+            "Sel  Why  Last Extracted             Note",
+            width - 1,
+            self._attr(1),
         )
         return 6
 
     def _draw_rows(self, stdscr: curses.window, start_line: int) -> None:
         height, width = stdscr.getmaxyx()
-        footer_reserved = 2
+        footer_reserved = self._footer_reserved_lines(height)
         visible_rows = max(1, height - start_line - footer_reserved)
 
         if self.cursor < self.top:
@@ -259,14 +323,14 @@ class ExtractTUI:
             line_no = start_line + screen_idx
             marker = ">" if row_idx == self.cursor else " "
             checkbox = "[x]" if row.selected else "[ ]"
-            status = "NEW" if row.status == "new" else "CHG"
+            reason = "FIRST" if row.reason == "first_extraction" else "CHG"
             ts = _truncate(short_time(row.last_extracted_at), 24)
             rel = relative_path(row.path, self.vault_path)
-            content = f"{marker}{checkbox}  {status:<4} {ts:<26} {rel}"
+            content = f"{marker}{checkbox}  {reason:<5} {ts:<26} {rel}"
             attr = curses.A_REVERSE if row_idx == self.cursor else curses.A_NORMAL
-            if row.status == "changed":
+            if row.reason == "content_changed":
                 attr |= self._attr(3)
-            elif row.status == "new":
+            elif row.reason == "first_extraction":
                 attr |= self._attr(4)
             stdscr.addnstr(line_no, 0, _truncate(content, width - 1), width - 1, attr)
 
@@ -277,9 +341,26 @@ class ExtractTUI:
         height, width = stdscr.getmaxyx()
         if height < 3:
             return
+        command_h = self._command_center_height(height)
+        reserved = command_h + 3
+        top = height - reserved
+
+        if top >= 0:
+            stdscr.hline(top, 0, curses.ACS_HLINE, max(1, width - 1))
+            stdscr.addnstr(top, 2, "Command Center", max(1, width - 3), self._attr(1))
+
+            lines = self.command_center_lines[-command_h:]
+            pad = command_h - len(lines)
+            for i in range(max(0, pad)):
+                y = top + 1 + i
+                stdscr.addnstr(y, 0, "", width - 1)
+            for i, line in enumerate(lines):
+                y = top + 1 + pad + i
+                stdscr.addnstr(y, 0, _truncate(line, width - 1), width - 1)
+
         controls = (
             "q quit | r refresh | j/k move | space toggle | a all | u clear | "
-            "n first N | g agent | m model | e extract"
+            "n first N | c test-note | x reset-db | g agent | m model | e extract | f rerun-failed"
         )
         stdscr.hline(height - 3, 0, curses.ACS_HLINE, max(1, width - 1))
         stdscr.addnstr(
@@ -297,11 +378,11 @@ class ExtractTUI:
     def draw(self, stdscr: curses.window) -> None:
         stdscr.erase()
         height, width = stdscr.getmaxyx()
-        if height < 12 or width < 60:
+        if height < 16 or width < 60:
             stdscr.addnstr(
                 0,
                 0,
-                "Terminal too small (need at least 60x12).",
+                "Terminal too small (need at least 60x16).",
                 max(1, width - 1),
                 self._attr(6, curses.A_BOLD),
             )
@@ -316,10 +397,15 @@ class ExtractTUI:
         self._draw_footer(stdscr)
         stdscr.refresh()
 
-    def run_selected(self, stdscr: curses.window) -> None:
-        selected_rows = [row for row in self.rows if row.selected]
-        if not selected_rows:
-            self.set_notice("No selected notes")
+    def _run_note_paths(
+        self,
+        stdscr: curses.window,
+        note_paths: list[str],
+        *,
+        mode_label: str,
+    ) -> None:
+        if not note_paths:
+            self.set_notice(f"No notes to run ({mode_label})")
             return
 
         run_dir = make_run_log_dir(self.repo_root)
@@ -328,41 +414,84 @@ class ExtractTUI:
         success = 0
         failed = 0
         failed_notes: list[str] = []
+        failed_paths: list[str] = []
 
-        total = len(selected_rows)
-        for idx, row in enumerate(selected_rows, start=1):
-            rel = relative_path(row.path, self.vault_path)
-            self.set_notice(f"running {idx}/{total}: {rel}")
+        total = len(note_paths)
+        for idx, path in enumerate(note_paths, start=1):
+            rel = relative_path(path, self.vault_path)
+            self.set_notice(f"{mode_label} {idx}/{total}: {rel}")
+            self._set_command_center(
+                [
+                    f"[{idx}/{total}] {rel}",
+                    "Running opencode extraction...",
+                    f"agent={self.current_agent} model={self.current_model}",
+                ]
+            )
             self.draw(stdscr)
 
             log_name = safe_log_name(rel, idx)
             result: RunResult = run_extraction_once(
                 repo_root=self.repo_root,
-                note_path=row.path,
+                note_path=path,
                 agent=self.current_agent,
                 model=self.current_model,
                 log_path=run_dir / log_name,
             )
 
             if result.success:
-                post_status = verify_post_extract_status(row.path, self.db_path)
+                post_status = verify_post_extract_status(path, self.db_path)
                 result.post_status = post_status
-                if post_status == "unchanged":
+                if post_status == "ok":
                     success += 1
                 else:
                     failed += 1
                     failed_notes.append(f"{rel} (post-status={post_status})")
+                    failed_paths.append(path)
             else:
                 failed += 1
                 failed_notes.append(f"{rel} (exit={result.returncode})")
+                failed_paths.append(path)
 
-        self.refresh_rows()
+            cc_lines = [
+                f"[{idx}/{total}] {rel}",
+                f"$ {' '.join(result.command)}",
+                f"exit={result.returncode} timed_out={result.timed_out} post_status={result.post_status}",
+            ]
+
+            stdout_tail = self._tail_lines(result.stdout, limit=4)
+            stderr_tail = self._tail_lines(result.stderr, limit=4)
+
+            if stdout_tail:
+                cc_lines.append("stdout:")
+                cc_lines.extend(stdout_tail)
+            if stderr_tail:
+                cc_lines.append("stderr:")
+                cc_lines.extend(stderr_tail)
+
+            self._set_command_center(cc_lines)
+
+        self.last_failed_paths = failed_paths
+        self.refresh_rows(initial=True)
         clear_selection(self.rows)
 
-        summary = f"done ok={success} fail={failed} logs={run_dir}"
+        summary = f"{mode_label} done ok={success} fail={failed} logs={run_dir}"
         if failed_notes:
             summary += f" | first_fail={failed_notes[0]}"
         self.set_notice(summary)
+
+    def run_selected(self, stdscr: curses.window) -> None:
+        selected_rows = [row for row in self.rows if row.selected]
+        if not selected_rows:
+            self.set_notice("No selected notes")
+            return
+        note_paths = [row.path for row in selected_rows]
+        self._run_note_paths(stdscr, note_paths, mode_label="run")
+
+    def rerun_failed(self, stdscr: curses.window) -> None:
+        if not self.last_failed_paths:
+            self.set_notice("No failed notes to re-run")
+            return
+        self._run_note_paths(stdscr, self.last_failed_paths, mode_label="rerun")
 
     def event_loop(self, stdscr: curses.window) -> None:
         try:
@@ -401,6 +530,12 @@ class ExtractTUI:
             if key == ord("n"):
                 self.select_n(stdscr)
                 continue
+            if key == ord("c"):
+                self.quick_create_note()
+                continue
+            if key == ord("x"):
+                self.reset_db(stdscr)
+                continue
             if key == ord("g"):
                 self.choose_agent(stdscr)
                 continue
@@ -409,6 +544,9 @@ class ExtractTUI:
                 continue
             if key == ord("e"):
                 self.run_selected(stdscr)
+                continue
+            if key == ord("f"):
+                self.rerun_failed(stdscr)
                 continue
 
 
@@ -422,10 +560,10 @@ def run_self_check(repo_root: Path, vault: Path, db: Path) -> int:
     print(
         "summary="
         f"total:{summary.total} "
-        f"pending:{summary.pending} "
-        f"new:{summary.new} "
-        f"changed:{summary.changed} "
-        f"unchanged:{summary.unchanged}"
+        f"needs_extraction:{summary.needs_extraction} "
+        f"first_extraction:{summary.first_extraction} "
+        f"content_changed:{summary.content_changed} "
+        f"ok:{summary.ok}"
     )
     print(f"agents={len(agents)} first={agents[0] if agents else 'none'}")
     print(f"models={len(models)} first={models[0] if models else 'none'}")

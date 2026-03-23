@@ -6,9 +6,11 @@ from src.vector.store import VectorStore
 
 from experimental.extract_tui.core import (
     NoteRow,
+    create_quick_test_note,
     load_pending_rows,
     parse_agents,
     parse_models,
+    reset_tracker_db,
     run_extraction_once,
     safe_log_name,
     select_first_n,
@@ -39,9 +41,27 @@ google/gemini-2.5-pro
 
 def test_select_first_n_clears_previous_and_selects():
     rows = [
-        NoteRow(path="a", status="new", last_extracted_at=None, selected=True),
-        NoteRow(path="b", status="changed", last_extracted_at=None, selected=True),
-        NoteRow(path="c", status="new", last_extracted_at=None, selected=False),
+        NoteRow(
+            path="a",
+            status="needs_extraction",
+            reason="first_extraction",
+            last_extracted_at=None,
+            selected=True,
+        ),
+        NoteRow(
+            path="b",
+            status="needs_extraction",
+            reason="content_changed",
+            last_extracted_at=None,
+            selected=True,
+        ),
+        NoteRow(
+            path="c",
+            status="needs_extraction",
+            reason="first_extraction",
+            last_extracted_at=None,
+            selected=False,
+        ),
     ]
     count = select_first_n(rows, 2)
     assert count == 2
@@ -50,8 +70,18 @@ def test_select_first_n_clears_previous_and_selects():
 
 def test_toggle_select_all_roundtrip():
     rows = [
-        NoteRow(path="a", status="new", last_extracted_at=None),
-        NoteRow(path="b", status="changed", last_extracted_at=None),
+        NoteRow(
+            path="a",
+            status="needs_extraction",
+            reason="first_extraction",
+            last_extracted_at=None,
+        ),
+        NoteRow(
+            path="b",
+            status="needs_extraction",
+            reason="content_changed",
+            last_extracted_at=None,
+        ),
     ]
     toggle_select_all(rows)
     assert selected_count(rows) == 2
@@ -79,11 +109,39 @@ def test_load_pending_rows_reports_new_and_changed(tmp_path):
     note_b.write_text("b2", encoding="utf-8")
 
     summary, rows = load_pending_rows(vault, db)
-    assert summary.pending == 2
-    assert summary.new == 1
-    assert summary.changed == 1
-    statuses = sorted(row.status for row in rows)
-    assert statuses == ["changed", "new"]
+    assert summary.needs_extraction == 2
+    assert summary.first_extraction == 1
+    assert summary.content_changed == 1
+    reasons = sorted(row.reason for row in rows)
+    assert reasons == ["content_changed", "first_extraction"]
+
+
+def test_load_pending_rows_uses_check_note_status_for_timestamp(tmp_path, monkeypatch):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    note = vault / "note.md"
+    note.write_text("v1", encoding="utf-8")
+
+    db = tmp_path / "vectors.db"
+    tracker = NoteTracker(VectorStore(db))
+    tracker.mark_extracted(str(note))
+    note.write_text("v2", encoding="utf-8")
+
+    def fake_check_note_status(self, path: str):  # noqa: ARG001
+        return {
+            "status": "needs_extraction",
+            "reason": "content_changed",
+            "last_extracted_at": "SENTINEL_TS",
+            "content": "v2",
+            "diff": "",
+        }
+
+    monkeypatch.setattr(NoteTracker, "check_note_status", fake_check_note_status)
+
+    _, rows = load_pending_rows(vault, db)
+    assert len(rows) == 1
+    assert rows[0].last_extracted_at == "SENTINEL_TS"
+    assert rows[0].reason == "content_changed"
 
 
 def test_run_extraction_once_writes_logs(tmp_path, monkeypatch):
@@ -107,6 +165,10 @@ def test_run_extraction_once_writes_logs(tmp_path, monkeypatch):
         log_path=log_path,
     )
     assert result.success is True
+    assert result.command[:4] == ["opencode", "run", "--agent", "graph-agent"]
+    assert result.stdout == "ok out"
+    assert result.stderr == ""
+    assert result.timed_out is False
     assert log_path.exists()
     log_text = log_path.read_text(encoding="utf-8")
     assert "opencode run --agent graph-agent" in log_text
@@ -121,4 +183,31 @@ def test_verify_post_extract_status(tmp_path):
     tracker = NoteTracker(VectorStore(db))
     tracker.mark_extracted(str(note))
 
-    assert verify_post_extract_status(str(note), Path(db)) == "unchanged"
+    assert verify_post_extract_status(str(note), Path(db)) == "ok"
+
+
+def test_reset_tracker_db_removes_extraction_state(tmp_path):
+    db = tmp_path / "vectors.experimental.db"
+    note = tmp_path / "note.md"
+    note.write_text("hello", encoding="utf-8")
+
+    tracker = NoteTracker(VectorStore(db))
+    tracker.mark_extracted(str(note))
+
+    reset_tracker_db(db)
+    tracker_after = NoteTracker(VectorStore(db))
+    status = tracker_after.check_note_status(str(note))
+    assert status["status"] == "needs_extraction"
+    assert status["reason"] == "first_extraction"
+
+
+def test_create_quick_test_note_creates_markdown_file(tmp_path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+
+    note_path = create_quick_test_note(vault)
+    assert note_path.exists()
+    assert note_path.suffix == ".md"
+    assert "Inbox" in str(note_path)
+    content = note_path.read_text(encoding="utf-8")
+    assert "# TUI Test Note" in content

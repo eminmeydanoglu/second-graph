@@ -23,16 +23,17 @@ _MODEL_LINE_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._:-]*$")
 @dataclass(slots=True)
 class VaultSummary:
     total: int
-    pending: int
-    unchanged: int
-    new: int
-    changed: int
+    needs_extraction: int
+    ok: int
+    first_extraction: int
+    content_changed: int
 
 
 @dataclass(slots=True)
 class NoteRow:
     path: str
     status: str
+    reason: str
     last_extracted_at: str | None
     selected: bool = False
 
@@ -43,6 +44,10 @@ class RunResult:
     success: bool
     returncode: int
     log_path: Path
+    command: list[str]
+    stdout: str
+    stderr: str
+    timed_out: bool
     post_status: str | None = None
 
 
@@ -115,7 +120,12 @@ def discover_models(repo_root: Path) -> list[str]:
 def load_pending_rows(
     vault_path: Path, db_path: Path
 ) -> tuple[VaultSummary, list[NoteRow]]:
-    """Load vault extraction summary + pending rows."""
+    """Load vault extraction summary + pending rows.
+
+    Uses the same NoteTracker functions exposed by MCP tools:
+    - list_pending_notes
+    - check_note_status
+    """
     tracker = NoteTracker(VectorStore(str(db_path)))
     result = tracker.list_pending_notes(str(vault_path))
     if not result.get("success"):
@@ -123,38 +133,49 @@ def load_pending_rows(
         raise RuntimeError(error)
 
     rows: list[NoteRow] = []
-    new_count = 0
+    first_count = 0
     changed_count = 0
     pending_items = result["pending"]
 
     for item in pending_items:
         path = item["path"]
-        status = item["status"]
-        stored = tracker.vectors.get_extraction_status(path)
-        last_extracted = stored["extracted_at"] if stored else None
+        reason = item.get("reason", "first_extraction")
+        if reason not in {"first_extraction", "content_changed"}:
+            reason = "first_extraction"
+
+        status_result = tracker.check_note_status(path)
+        last_extracted = status_result.get("last_extracted_at")
+
+        status_from_check = status_result.get("status")
+        reason_from_check = status_result.get("reason")
+        if status_from_check == "needs_extraction":
+            if reason_from_check in {"first_extraction", "content_changed"}:
+                reason = reason_from_check
+
         rows.append(
             NoteRow(
                 path=path,
-                status=status,
+                status="needs_extraction",
+                reason=reason,
                 last_extracted_at=last_extracted,
                 selected=False,
             )
         )
-        if status == "new":
-            new_count += 1
-        elif status == "changed":
+        if reason == "first_extraction":
+            first_count += 1
+        elif reason == "content_changed":
             changed_count += 1
 
-    rows.sort(key=lambda r: (0 if r.status == "changed" else 1, r.path.lower()))
+    rows.sort(key=lambda r: (0 if r.reason == "content_changed" else 1, r.path.lower()))
 
-    unchanged_count = int(result["unchanged_count"])
+    ok_count = int(result.get("ok_count", result.get("unchanged_count", 0)))
     pending_count = int(result["pending_count"])
     summary = VaultSummary(
-        total=pending_count + unchanged_count,
-        pending=pending_count,
-        unchanged=unchanged_count,
-        new=new_count,
-        changed=changed_count,
+        total=pending_count + ok_count,
+        needs_extraction=pending_count,
+        ok=ok_count,
+        first_extraction=first_count,
+        content_changed=changed_count,
     )
     return summary, rows
 
@@ -268,6 +289,10 @@ def run_extraction_once(
         success=(result.returncode == 0) and (not timed_out),
         returncode=result.returncode,
         log_path=log_path,
+        command=command,
+        stdout=result.stdout or "",
+        stderr=result.stderr or "",
+        timed_out=timed_out,
     )
 
 
@@ -290,3 +315,38 @@ def relative_path(path: str, root: Path) -> str:
         return str(full.relative_to(root))
     except ValueError:
         return str(full)
+
+
+def reset_tracker_db(db_path: Path) -> Path:
+    """Reset extraction tracker DB file for clean experimental runs."""
+    resolved = db_path.expanduser().resolve()
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    if resolved.exists():
+        resolved.unlink()
+    VectorStore(str(resolved))
+    return resolved
+
+
+def create_quick_test_note(vault_path: Path, inbox_dir: str = "Inbox") -> Path:
+    """Create a timestamped markdown test note under vault inbox."""
+    root = vault_path.expanduser().resolve()
+    inbox = root / inbox_dir
+    inbox.mkdir(parents=True, exist_ok=True)
+
+    now = datetime.now().strftime("%Y%m%d_%H%M%S")
+    note_path = inbox / f"tui-test-{now}.md"
+    body = "\n".join(
+        [
+            "---",
+            f"created: {datetime.now().isoformat(timespec='seconds')}",
+            "source: extract-tui",
+            "---",
+            "",
+            "# TUI Test Note",
+            "",
+            "Quick note created from experimental extraction TUI.",
+            "",
+        ]
+    )
+    note_path.write_text(body, encoding="utf-8")
+    return note_path

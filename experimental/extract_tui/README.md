@@ -27,17 +27,22 @@ uv run python experimental/extract_tui/main.py \
 - `a`: toggle select all / unselect all
 - `u`: clear selection
 - `n`: select first N pending notes
+- `c`: create a quick test note under `Inbox/`
+- `x`: reset tracker DB (asks for `RESET` confirmation)
 - `g`: set agent (index or name)
 - `m`: set model (index or name)
 - `e`: run extraction for selected notes
+- `f`: re-run last failed extraction set
 
 ## What it shows
 
-- Vault totals: `total`, `pending`, `new`, `changed`, `unchanged`
-- Pending note list with `status` and `last_extracted_at`
+- Vault totals: `total`, `needs_extraction`, `first_extraction`, `content_changed`, `ok`
+- Pending note list with extraction reason (`FIRST` or `CHG`) and `last_extracted_at`
 - Current execution config: `agent`, `model`
 - Run result summary with log directory
-- Colorized status rows (`CHG`, `NEW`) and compact command bar
+- Last failed set memory for one-key retry
+- Command Center panel with latest `opencode run` command + stdout/stderr tail
+- Colorized reason rows (`CHG`, `FIRST`) and compact command bar
 
 Logs are written under:
 
