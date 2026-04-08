@@ -152,4 +152,7 @@ def build_routing_text(node_type: str, props: dict[str, Any] | None) -> str:
             parts.append(summary)
         return _compose(parts)
 
-    return _compose([f"{canonical_type}: {name}"])
+    parts = [f"{canonical_type}: {name}"]
+    if summary:
+        parts.append(summary)
+    return _compose(parts)

@@ -4,19 +4,14 @@ Exposes knowledge graph CRUD operations as MCP tools.
 Used by the Graph Agent (subagent) for runtime memory manipulation.
 """
 
+import re
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
 from ..graph.neo4j_storage import Neo4jStorage
 from ..graph.routing_text import build_routing_text
-from ..graph.schema import (
-    validate_node_type,
-    validate_edge,
-    generate_node_id,
-    get_node_types,
-    get_edge_types,
-)
+from ..graph.schema import generate_node_id
 from ..graph.sync import NoteSynchronizer
 from ..vector.store import VectorStore
 from ..vector.embedder import Embedder
@@ -28,11 +23,11 @@ mcp = FastMCP(
     instructions="""
 Knowledge graph CRUD operations.
 
-Node Types: Note, Tag, Goal, Project, Belief, Value, Person, Concept, Source, Fear
-Edge Types: CONTRIBUTES_TO, MOTIVATES, HAS_GOAL, BELIEVES, INTERESTED_IN, RELATED_TO, etc.
+Node labels and relationship types may be any concise Neo4j-safe token matching
+[A-Za-z][A-Za-z0-9_]{0,63}.
 
 Use add_node/add_edge to create new knowledge.
-Use find_node/get_neighbors for exploration.
+Use find_node/get_node for exploration.
 Use update_node/delete_node for modifications.
 """,
 )
@@ -59,6 +54,7 @@ ROUTING_FIELDS = {
 
 MENTIONS_EXCLUDED_RELATIONS = {"WIKILINK", "TAGGED_WITH", "MENTIONS"}
 MENTIONS_EXCLUDED_NODE_TYPES = {"Note", "Tag"}
+CUSTOM_LABEL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
 
 
 def init_server(
@@ -123,16 +119,26 @@ def _strip_internal_dict(data: dict) -> dict:
 
 
 def _canonical_node_type_from_labels(labels: list[str]) -> str:
-    """Pick canonical schema type from labels deterministically."""
-    valid_types = get_node_types()
-    for node_type in valid_types:
-        if node_type in labels:
-            return node_type
+    """Pick the first non-internal label deterministically."""
+    for label in labels:
+        if label != "Entity":
+            return label
     return "Unknown"
 
 
 def _relation_key(relation: str) -> str:
     return relation.strip().upper()
+
+
+def _custom_label_error(value: str, *, kind: str) -> str | None:
+    if not value:
+        return f"{kind} must not be empty"
+    if CUSTOM_LABEL_RE.fullmatch(value):
+        return None
+    return (
+        f"Invalid custom {kind}: {value}. Use a Neo4j-safe token matching "
+        "[A-Za-z][A-Za-z0-9_]{0,63}"
+    )
 
 
 def _extract_source_note(properties: dict | None) -> str | None:
@@ -228,7 +234,7 @@ def add_node(
     """Add a new node to the knowledge graph.
 
     Args:
-        node_type: Node type (Goal, Project, Person, Concept, Belief, Value, Fear, etc.)
+        node_type: Neo4j-safe node label
         name: Human-readable name for the node
         summary: Optional description (used for semantic search)
         properties: Optional additional properties (status, priority, etc.)
@@ -236,11 +242,10 @@ def add_node(
     Returns:
         Dict with success status and created node
     """
-    if not validate_node_type(node_type):
-        return {
-            "success": False,
-            "error": f"Invalid node type: {node_type}. Valid types: {get_node_types()}",
-        }
+    node_type = node_type.strip()
+    error = _custom_label_error(node_type, kind="node type")
+    if error:
+        return {"success": False, "error": error}
 
     node_id = generate_node_id(node_type, name)
     props = properties.copy() if properties else {}
@@ -262,17 +267,27 @@ def add_node(
 
 
 @mcp.tool()
-def get_node(node_id: str) -> dict:
-    """Get a node by its ID with all connections.
+def get_node(
+    node_id: str,
+    connections: bool = True,
+    connection_limit: int | None = 30,
+) -> dict:
+    """Get a node by its ID with optional nearby connections.
 
     Args:
         node_id: The node's unique identifier (e.g., "goal:build_ai")
+        connections: Whether to include nearby connections
+        connection_limit: Max connections to return. Use None to return all.
 
     Returns:
-        Dict with node data and its connections
+        Dict with node data, connection_count, and optionally connections
     """
     db = _require_storage()
-    result = db.get_node(node_id)
+    result = db.get_node(
+        node_id,
+        connections=connections,
+        connection_limit=connection_limit,
+    )
     if not result:
         return {"success": False, "error": f"Node not found: {node_id}"}
     return _strip_internal_dict({"success": True, **result})
@@ -375,10 +390,13 @@ def add_edge(
 ) -> dict:
     """Create a relationship between two nodes.
 
+    When properties.source_note points to a Note node, this also backfills
+    Note -> endpoint MENTIONS edges so provenance notes remain discoverable.
+
     Args:
         from_id: Source node ID
         to_id: Target node ID
-        relation: Relationship type (CONTRIBUTES_TO, MOTIVATES, HAS_GOAL, etc.)
+        relation: Neo4j-safe relationship type
         properties: Optional properties (confidence, fact, source, etc.)
 
     Returns:
@@ -394,16 +412,10 @@ def add_edge(
     if not target_node:
         return {"success": False, "error": f"Target node not found: {to_id}"}
 
-    source_type = _canonical_node_type_from_labels(
-        source_node["node"].get("_labels", [])
-    )
-    target_type = _canonical_node_type_from_labels(
-        target_node["node"].get("_labels", [])
-    )
-
-    validation = validate_edge(source_type, target_type, relation, strict=True)
-    if not validation.valid:
-        return {"success": False, "errors": validation.errors}
+    relation = relation.strip()
+    error = _custom_label_error(relation, kind="relationship type")
+    if error:
+        return {"success": False, "error": error}
 
     result = db.add_edge(from_id, to_id, relation, properties)
 
@@ -416,8 +428,6 @@ def add_edge(
     )
 
     warnings = []
-    if validation.warnings:
-        warnings.extend(validation.warnings)
     warnings.extend(mentions_info["warnings"])
 
     result["mentions_added"] = mentions_info["created"]
@@ -479,29 +489,6 @@ def invalidate_edge(edge_id: str, reason: str | None = None) -> dict:
     if not result:
         return {"success": False, "error": f"Edge not found: {edge_id}"}
     return {"success": True, "edge": result}
-
-
-@mcp.tool()
-def get_neighbors(
-    node_id: str,
-    direction: str = "both",
-    edge_types: list[str] | None = None,
-) -> dict:
-    """Get neighbors of a node.
-
-    Args:
-        node_id: The node's unique identifier
-        direction: "in", "out", or "both"
-        edge_types: Optional list of relationship types to filter
-
-    Returns:
-        Dict with neighbor nodes and relationships
-    """
-    db = _require_storage()
-    results = db.get_neighbors(node_id, direction, edge_types)
-    return _strip_internal_dict(
-        {"success": True, "count": len(results), "neighbors": results}
-    )
 
 
 @mcp.tool()
@@ -606,20 +593,6 @@ def recall(
         }
 
     return _strip_internal_dict(response)
-
-
-@mcp.tool()
-def get_schema() -> dict:
-    """Get available node and edge types.
-
-    Returns:
-        Dict with valid node_types and edge_types
-    """
-    return {
-        "success": True,
-        "node_types": get_node_types(),
-        "edge_types": get_edge_types(),
-    }
 
 
 @mcp.tool()

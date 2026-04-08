@@ -164,31 +164,52 @@ class Neo4jStorage:
                 return self._clean_node(node_dict)
             return None
 
-    def get_node(self, node_id: str) -> dict | None:
-        """Get a node by ID with its connections.
+    def get_node(
+        self,
+        node_id: str,
+        connections: bool = True,
+        connection_limit: int | None = 30,
+    ) -> dict | None:
+        """Get a node by ID with optional connection preview.
 
         Args:
             node_id: The node's unique identifier
+            connections: Whether to return connection details
+            connection_limit: Max connections to return. None means all.
 
         Returns:
-            Dict with 'node' and 'connections' or None if not found
+            Dict with node, connection_count, connections_returned, and connections.
         """
+        include_connections = bool(connections)
+        requested_connection_limit = connection_limit
+        if connection_limit is not None:
+            connection_limit = max(0, int(connection_limit))
+
         with self.driver.session() as session:
             result = session.run(
                 """
                 MATCH (n {id: $id})
                 OPTIONAL MATCH (n)-[r]-(neighbor)
-                RETURN n, labels(n) as labels,
-                       collect(DISTINCT {
+                WITH n, labels(n) as labels,
+                     [c IN collect(DISTINCT {
                            edge_id: r.id,
                            neighbor_id: neighbor.id,
                            neighbor_name: neighbor.name,
                            neighbor_labels: labels(neighbor),
                            relation: type(r),
                            direction: CASE WHEN startNode(r) = n THEN 'out' ELSE 'in' END
-                       }) as connections
+                       }) WHERE c.neighbor_id IS NOT NULL] as all_connections
+                RETURN n, labels,
+                       size(all_connections) as connection_count,
+                       CASE
+                           WHEN $connections = false THEN []
+                           WHEN $connection_limit IS NULL THEN all_connections
+                           ELSE all_connections[..$connection_limit]
+                       END as connections
                 """,
                 id=node_id,
+                connections=include_connections,
+                connection_limit=connection_limit,
             )
             record = result.single()
             if not record or record["n"] is None:
@@ -197,12 +218,18 @@ class Neo4jStorage:
             node_dict = dict(record["n"])
             node_dict["_labels"] = record["labels"]
 
-            connections = [
-                c for c in record["connections"] if c["neighbor_id"] is not None
-            ]
-            self._clean_connections(connections)
+            returned_connections = list(record["connections"])
+            self._clean_connections(returned_connections)
 
-            return {"node": self._clean_node(node_dict), "connections": connections}
+            return {
+                "node": self._clean_node(node_dict),
+                "connection_count": record["connection_count"],
+                "connections_returned": len(returned_connections),
+                "connection_limit": requested_connection_limit
+                if include_connections
+                else 0,
+                "connections": returned_connections,
+            }
 
     def list_nodes(self) -> list[dict]:
         """List all nodes with labels for bulk operations."""
@@ -900,10 +927,24 @@ class Neo4jStorage:
                 ).single()["count"]
                 label_counts[label] = count
 
+            rel_types = session.run(
+                "CALL db.relationshipTypes() YIELD relationshipType "
+                "RETURN relationshipType"
+            ).data()
+            relationship_counts = {}
+            for row in rel_types:
+                relationship_type = row["relationshipType"]
+                count = session.run(
+                    f"MATCH ()-[r:{self._sanitize_label(relationship_type).upper()}]->() "
+                    "RETURN count(r) as count"
+                ).single()["count"]
+                relationship_counts[relationship_type] = count
+
             return {
                 "nodes": node_count,
                 "relationships": rel_count,
                 "by_label": label_counts,
+                "by_relationship_type": relationship_counts,
             }
 
     def _serialize_value(self, value: Any) -> Any:

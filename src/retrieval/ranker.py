@@ -2,7 +2,6 @@
 
 from dataclasses import replace
 
-from ..graph.schema import get_node_types
 from .config import DEFAULT_RETRIEVAL_CONFIG, RetrievalConfig
 from .tokenize import keyword_overlap_score, normalize_whitespace
 from .types import ScoredNode
@@ -25,14 +24,9 @@ def clamp_01(value: float | int | None) -> float:
 
 
 def canonical_node_type_from_labels(labels: list[str] | None) -> str:
-    """Pick canonical schema node type from labels."""
+    """Pick the first non-internal node label."""
     if not labels:
         return _UNKNOWN_NODE_TYPE
-
-    valid_types = get_node_types()
-    for node_type in valid_types:
-        if node_type in labels:
-            return node_type
 
     for label in labels:
         if label != "Entity":

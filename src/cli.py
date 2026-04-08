@@ -10,7 +10,6 @@ from .graph.scanner import VaultScanner
 from .graph.sync import NoteSynchronizer
 from .graph.neo4j_storage import Neo4jStorage
 from .graph.routing_text import build_routing_text
-from .graph.schema import get_node_types
 from .vector.embedder import Embedder
 from .retrieval.pipeline import recall_structured
 
@@ -22,11 +21,10 @@ def cli():
 
 
 def _canonical_node_type_from_labels(labels: list[str]) -> str:
-    """Pick canonical schema type from node labels."""
-    valid_types = get_node_types()
-    for node_type in valid_types:
-        if node_type in labels:
-            return node_type
+    """Pick the first non-internal node label."""
+    for label in labels:
+        if label != "Entity":
+            return label
     return "Unknown"
 
 
