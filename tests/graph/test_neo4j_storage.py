@@ -49,6 +49,42 @@ class TestNeo4jCRUD:
         # Cleanup
         storage.delete_node("goal:test_crud_goal")
 
+    def test_get_node_connection_limit_and_count(self, storage):
+        """get_node should limit returned connections while reporting total count."""
+        center_id = "person:get_node_connection_limit"
+        neighbor_ids = [f"goal:get_node_connection_limit_{i}" for i in range(35)]
+
+        storage.add_node("Person", center_id, "Connection Limit Person", {})
+        for i, neighbor_id in enumerate(neighbor_ids):
+            storage.add_node("Goal", neighbor_id, f"Connection Limit Goal {i}", {})
+            storage.add_edge(center_id, neighbor_id, "HAS_GOAL")
+
+        try:
+            default_result = storage.get_node(center_id)
+            assert default_result is not None
+            assert default_result["connection_count"] >= 35
+            assert default_result["connections_returned"] == 30
+            assert len(default_result["connections"]) == 30
+            assert default_result["connection_limit"] == 30
+
+            metadata_only = storage.get_node(center_id, connections=False)
+            assert metadata_only is not None
+            assert metadata_only["connection_count"] >= 35
+            assert metadata_only["connections_returned"] == 0
+            assert metadata_only["connections"] == []
+            assert metadata_only["connection_limit"] == 0
+
+            all_connections = storage.get_node(center_id, connection_limit=None)
+            assert all_connections is not None
+            assert all_connections["connections_returned"] == all_connections[
+                "connection_count"
+            ]
+            assert all_connections["connection_limit"] is None
+        finally:
+            storage.delete_node(center_id)
+            for neighbor_id in neighbor_ids:
+                storage.delete_node(neighbor_id)
+
     def test_find_nodes(self, storage):
         """Test finding nodes by name."""
         # Setup
@@ -718,6 +754,16 @@ class TestNeo4jVectorSearch:
 
         stats = storage.get_stats()
         assert "Entity" not in stats.get("by_label", {})
+
+    def test_stats_includes_relationship_type_counts(self, storage):
+        """get_stats should include relationship type counts for graph inspection."""
+        storage.add_node("Concept", "concept:stats_rel_a", "Stats Rel A", {})
+        storage.add_node("Concept", "concept:stats_rel_b", "Stats Rel B", {})
+        storage.add_edge("concept:stats_rel_a", "concept:stats_rel_b", "RELATED_TO")
+
+        stats = storage.get_stats()
+
+        assert stats.get("by_relationship_type", {}).get("RELATED_TO", 0) >= 1
 
     def test_set_embedding_dimension_mismatch_raises(self, storage):
         """set_embedding should reject vectors with wrong dimensions."""

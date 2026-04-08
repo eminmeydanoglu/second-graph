@@ -18,7 +18,12 @@ class _FakeStorage:
     def merge_nodes_simple(self, keep_id: str, merge_id: str) -> dict:
         return {"merged": False, "edges_transferred": 0, "error": "node not found"}
 
-    def get_node(self, node_id: str) -> dict | None:
+    def get_node(
+        self,
+        node_id: str,
+        connections: bool = True,
+        connection_limit: int | None = 30,
+    ) -> dict | None:
         """Return a fake node for validation tests."""
         if node_id.startswith("note:"):
             return {
@@ -81,27 +86,25 @@ class TestMCPFailurePropagation:
         assert result["merged"] is False
 
 
-class TestStrictValidation:
-    """Tests for strict schema validation in MCP add_edge."""
+class TestSchemaValidation:
+    """Tests for schema validation in MCP add_edge."""
 
-    def test_add_edge_rejects_unknown_edge_type(self, monkeypatch):
-        """MCP add_edge should reject unknown relation types."""
+    def test_add_edge_allows_custom_edge_type_without_warning(self, monkeypatch):
+        """MCP add_edge should allow safe custom relation types."""
         monkeypatch.setattr(mcp_server, "storage", _FakeStorage())
 
-        result = mcp_server.add_edge("person:x", "goal:y", "FAKE_RELATION")
+        result = mcp_server.add_edge("person:x", "goal:y", "INSPIRED_BY")
 
-        assert result["success"] is False
-        assert any("Unknown edge type" in e for e in result["errors"])
+        assert result["success"] is True
+        assert "custom_relationship_type:INSPIRED_BY" not in result.get("warnings", [])
 
-    def test_add_edge_rejects_invalid_constraint(self, monkeypatch):
-        """MCP add_edge should reject invalid source/target type combos."""
+    def test_add_edge_does_not_apply_common_schema_constraints(self, monkeypatch):
+        """MCP add_edge should not reject names based on the common vocabulary."""
         monkeypatch.setattr(mcp_server, "storage", _FakeStorage())
 
-        # Person -> Goal via CONTRIBUTES_TO is invalid (Person not in valid sources)
         result = mcp_server.add_edge("person:x", "goal:y", "CONTRIBUTES_TO")
 
-        assert result["success"] is False
-        assert len(result["errors"]) > 0
+        assert result["success"] is True
 
     def test_add_edge_passes_valid_combo(self, monkeypatch):
         """MCP add_edge should allow valid combos."""
@@ -115,7 +118,12 @@ class TestStrictValidation:
         """Validation should use canonical type even with extra labels present."""
 
         class _MultiLabelStorage(_FakeStorage):
-            def get_node(self, node_id: str) -> dict | None:
+            def get_node(
+                self,
+                node_id: str,
+                connections: bool = True,
+                connection_limit: int | None = 30,
+            ) -> dict | None:
                 if node_id.startswith("person:"):
                     return {
                         "node": {
@@ -227,7 +235,12 @@ class TestStrictValidation:
         """Invalid source_note should not fail add_edge but should warn."""
 
         class _MissingSourceStorage(_FakeStorage):
-            def get_node(self, node_id: str) -> dict | None:
+            def get_node(
+                self,
+                node_id: str,
+                connections: bool = True,
+                connection_limit: int | None = 30,
+            ) -> dict | None:
                 if node_id == "note:missing":
                     return None
                 return super().get_node(node_id)
@@ -339,7 +352,12 @@ class TestRecallTool:
 class _LeakyStorage:
     """Storage stub that intentionally leaks internal vector fields."""
 
-    def get_node(self, node_id: str) -> dict | None:
+    def get_node(
+        self,
+        node_id: str,
+        connections: bool = True,
+        connection_limit: int | None = 30,
+    ) -> dict | None:
         return {
             "node": {
                 "id": node_id,
@@ -407,6 +425,46 @@ class TestPrivacyFiltering:
         assert result["success"] is True
         assert "Entity" not in result["by_label"]
 
+    def test_get_node_passes_connection_controls(self, monkeypatch):
+        class _ConnectionStorage:
+            def __init__(self):
+                self.calls = []
+
+            def get_node(
+                self,
+                node_id: str,
+                connections: bool = True,
+                connection_limit: int | None = 30,
+            ):
+                self.calls.append((node_id, connections, connection_limit))
+                returned = 0 if not connections else 42 if connection_limit is None else connection_limit
+                return {
+                    "node": {"id": node_id, "name": "Node", "_labels": ["Concept"]},
+                    "connection_count": 42,
+                    "connections_returned": returned,
+                    "connection_limit": connection_limit if connections else 0,
+                    "connections": [],
+                }
+
+        storage = _ConnectionStorage()
+        monkeypatch.setattr(mcp_server, "storage", storage)
+
+        default_result = mcp_server.get_node("concept:x")
+        all_result = mcp_server.get_node("concept:x", connection_limit=None)
+        metadata_only = mcp_server.get_node("concept:x", connections=False)
+
+        assert default_result["connection_count"] == 42
+        assert default_result["connections_returned"] == 30
+        assert all_result["connections_returned"] == 42
+        assert all_result["connection_limit"] is None
+        assert metadata_only["connections_returned"] == 0
+        assert metadata_only["connection_limit"] == 0
+        assert storage.calls == [
+            ("concept:x", True, 30),
+            ("concept:x", True, None),
+            ("concept:x", False, 30),
+        ]
+
 
 class _RoutingStorage:
     def __init__(self):
@@ -424,7 +482,12 @@ class _RoutingStorage:
         node.update(properties)
         return node
 
-    def get_node(self, node_id: str):
+    def get_node(
+        self,
+        node_id: str,
+        connections: bool = True,
+        connection_limit: int | None = 30,
+    ):
         node = self.updated.get(node_id)
         if not node:
             return None
@@ -460,6 +523,26 @@ class TestRoutingEmbeddings:
         assert result["success"] is True
         assert len(storage.embeddings) == 1
         assert emb.texts[-1] == "Person: Girard. Relationship: influential"
+
+    def test_add_node_allows_custom_type(self, monkeypatch):
+        storage = _RoutingStorage()
+        emb = _CaptureEmbedder()
+        monkeypatch.setattr(mcp_server, "storage", storage)
+        monkeypatch.setattr(mcp_server, "embedder", emb)
+
+        result = mcp_server.add_node(
+            "ResearchThread",
+            "Loose graph schema",
+            summary="A design thread about keeping the knowledge graph ontology flexible.",
+        )
+
+        assert result["success"] is True
+        assert result["node_id"] == "researchthread:loose_graph_schema"
+        assert "custom_node_type:ResearchThread" not in result.get("warnings", [])
+        assert (
+            emb.texts[-1]
+            == "ResearchThread: Loose graph schema. A design thread about keeping the knowledge graph ontology flexible."
+        )
 
     def test_update_node_reembeds_when_routing_field_changes(self, monkeypatch):
         storage = _RoutingStorage()
