@@ -15,7 +15,7 @@ import pytest
 from src.graph.sync import NoteSynchronizer
 from src.graph.neo4j_storage import Neo4jStorage
 from src.graph.schema import EdgeType, generate_node_id
-from src.graph.tests.neo4j_test_config import get_test_neo4j_config, guard_test_uri
+from tests.graph.neo4j_test_config import get_test_neo4j_config, guard_test_uri
 from src.vector.embedder import Embedder
 
 

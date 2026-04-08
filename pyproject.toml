@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "second-graph"
 version = "0.1.0"
@@ -6,17 +10,11 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "click>=8.3.1",
-    "matplotlib>=3.10.8",
     "mcp>=1.0.0",
     "neo4j>=6.1.0",
-    "networkx>=3.6.1",
-    "openai>=2.16.0",
-    "pydantic>=2.0.0",
-    "pyvis>=0.3.2",
     "pyyaml>=6.0.3",
     "sentence-transformers>=5.2.2",
     "sqlite-vec>=0.1.6",
-    "tqdm>=4.67.2",
 ]
 
 [project.optional-dependencies]
@@ -30,9 +28,10 @@ obsidian-brain = "src.cli:cli"
 obsidian-brain-mcp = "src.mcp:main"
 
 [tool.setuptools]
-packages = ["src", "src.graph", "src.graph.tests", "src.parser", "src.parser.tests", "src.vector", "src.vector.tests", "src.extraction", "src.extraction.tests", "src.mcp", "src.mcp.tests", "src.retrieval", "src.retrieval.tests"]
+packages = ["src", "src.graph", "src.parser", "src.vector", "src.extraction", "src.mcp", "src.retrieval"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
-testpaths = ["src/graph/tests", "src/vector/tests", "src/mcp/tests", "src/parser/tests", "src/extraction/tests", "src/retrieval/tests"]
+testpaths = ["tests"]
+norecursedirs = ["archive", "data", "dist", "experimental"]
 asyncio_mode = "auto"

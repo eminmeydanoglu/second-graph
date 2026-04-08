@@ -6,7 +6,7 @@ import subprocess
 import pytest
 
 from src.mcp import server as mcp_server
-from src.graph.tests.neo4j_test_config import get_test_neo4j_config, guard_test_uri
+from tests.graph.neo4j_test_config import get_test_neo4j_config, guard_test_uri
 
 
 class _FakeStorage:
