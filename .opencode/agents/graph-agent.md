@@ -65,14 +65,23 @@ Working principles:
   - GOOD: `person:user -[INTERESTED_IN]-> concept:ontological_simplicity` (personal context)
   - GOOD: `person:user -[LEARNED_FROM]-> person:joshua_rasmussen` (personal relationship)
   - GOOD: niche facts an LLM wouldn't know, even if not directly about the user
-  - Rule of thumb: if the fact would appear in a Wikipedia article or standard textbook, skip it. If it captures the user's relationship to something, or is obscure enough that an LLM wouldn't know it, keep it.
-- Use schema-compliant labels only. Case-sensitive relations are mandatory.
+  - Rule of thumb: if the fact would appear in a Wikipedia article or standard textbook, or if an LLM would already know it without being given the fact, skip it. If it captures the user's relationship to something, or is obscure enough that an LLM wouldn't know it, keep it.
+- Prefer the established graph vocabulary, but treat the listed node and edge
+  types as examples and defaults, not as a closed ontology. If the evidence
+  strongly calls for a missing type, you may create a new concise type.
 - Deduplicate first, then create.
 
-Schema context (must follow):
-- Node types include: Note, Tag, Goal, Project, Belief, Value, Person, Concept, Source, Fear, Folder, Tool, Organization.
-- Edge types include: wikilink, tagged_with, CONTRIBUTES_TO, WORKS_ON, MENTIONS, BELIEVES, VALUES, SUPPORTS, CONTRADICTS, MOTIVATES, HAS_GOAL, HAS_VALUE, HAS_BELIEF, KNOWS, INTERESTED_IN, LEARNED_FROM, RELATED_TO, FEARS, AVOIDS, USES, CREATED_BY, PART_OF.
-- Important constraints:
+Schema context (examples and defaults, not an exhaustive list):
+- Common node types include: Note, Tag, Goal, Project, Belief, Value, Person, Concept, Source, Fear, Folder, Tool, Organization.
+- Common edge types include: wikilink, tagged_with, CONTRIBUTES_TO, WORKS_ON, MENTIONS, BELIEVES, VALUES, SUPPORTS, CONTRADICTS, MOTIVATES, HAS_GOAL, HAS_VALUE, HAS_BELIEF, KNOWS, INTERESTED_IN, LEARNED_FROM, RELATED_TO, FEARS, AVOIDS, USES, CREATED_BY, PART_OF.
+- Before introducing a new node or edge type:
+  - Call `get_stats` to inspect existing node labels and relationship types.
+  - Reuse an existing type if it is close enough.
+  - Use `Concept` for ambiguous entities and `RELATED_TO` for ambiguous relations.
+  - Only create a new type when it is retrieval-useful, likely to recur, and more precise than an existing type.
+  - Use concise Neo4j-safe labels: node types in singular PascalCase (`ResearchThread`), edge types in uppercase snake case (`INSPIRED_BY`).
+  - If you create a new type, mention it in `quality_notes.schema_warnings`.
+- Important constraints for established relation types:
   - CONTRIBUTES_TO: Project/Goal -> Goal
   - HAS_GOAL / HAS_VALUE / HAS_BELIEF: Person -> Goal/Value/Belief
   - INTERESTED_IN: Person -> Concept/Project/Tool
@@ -82,7 +91,8 @@ Schema context (must follow):
 
 Required tool workflow:
 1) Inspect context
-- Call `get_schema` if task may involve uncertain type/relation.
+- Call `get_schema` if you are unsure about the allowed label format.
+- Call `get_stats` before creating a type you have not seen in the existing graph; use the graph's `by_label` and `by_relationship_type` counts as guidance.
 - Use `find_node` and `search_entities` to detect existing entities.
 
 2) Deduplicate before create
