@@ -67,8 +67,8 @@ def init_server(
     global storage, embedder, synchronizer, tracker
     storage = Neo4jStorage(uri=neo4j_uri, user=neo4j_user, password=neo4j_password)
     storage.ensure_vector_index()
-    embedder = Embedder()
-    synchronizer = NoteSynchronizer(storage, embedder)
+    embedder = None
+    synchronizer = NoteSynchronizer(storage, embedder_factory=_require_embedder)
 
     # VectorStore still used for extraction tracking (note hashes, diffs)
     vectors = VectorStore(vector_db)
@@ -83,9 +83,10 @@ def _require_storage() -> Neo4jStorage:
 
 
 def _require_embedder() -> Embedder:
-    """Get embedder or raise error."""
+    """Get embedder, creating it on first embedding-related request."""
+    global embedder
     if embedder is None:
-        raise RuntimeError("Server not initialized. Call init_server() first.")
+        embedder = Embedder()
     return embedder
 
 
@@ -116,6 +117,19 @@ def _strip_internal_fields(data: Any) -> Any:
 def _strip_internal_dict(data: dict) -> dict:
     """Typed wrapper for dict responses."""
     return _strip_internal_fields(data)
+
+
+def _normalize_node_types(node_types: list[str] | str | None) -> list[str] | None:
+    """Normalize MCP node type filters from array or comma-separated string input."""
+    if node_types is None:
+        return None
+    if isinstance(node_types, str):
+        values = node_types.split(",")
+    else:
+        values = node_types
+
+    normalized = [value.strip() for value in values if value.strip()]
+    return normalized or None
 
 
 def _canonical_node_type_from_labels(labels: list[str]) -> str:
@@ -513,7 +527,7 @@ def find_path(from_id: str, to_id: str, max_depth: int = 4) -> dict:
 @mcp.tool()
 def search_entities(
     query: str,
-    node_types: list[str] | None = None,
+    node_types: list[str] | str | None = None,
     limit: int = 10,
 ) -> dict:
     """Semantic search for entities.
@@ -522,7 +536,8 @@ def search_entities(
 
     Args:
         query: Natural language search query
-        node_types: Optional list of node types to filter
+        node_types: Optional list of node types to filter. A comma-separated
+            string is also accepted for clients that cannot send arrays.
         limit: Maximum results (default 10)
 
     Returns:
@@ -532,7 +547,11 @@ def search_entities(
     db = _require_storage()
 
     query_embedding = emb.embed(query)
-    results = db.search_similar(query_embedding, node_types, limit)
+    results = db.search_similar(
+        query_embedding,
+        _normalize_node_types(node_types),
+        limit,
+    )
     return _strip_internal_dict(
         {"success": True, "count": len(results), "entities": results}
     )

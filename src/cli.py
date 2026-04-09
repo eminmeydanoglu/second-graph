@@ -487,16 +487,20 @@ def graph_restore(
 )
 @click.option(
     "--transport",
-    type=click.Choice(["stdio", "sse"]),
+    type=click.Choice(["stdio", "sse", "streamable-http"]),
     default="stdio",
     help="MCP transport type",
 )
+@click.option("--host", default="127.0.0.1", help="Host for HTTP-based MCP transports")
+@click.option("--port", default=8000, type=int, help="Port for HTTP-based MCP transports")
 def mcp_server(
     neo4j_uri: str,
     neo4j_user: str,
     neo4j_password: str,
     vector_db: Path,
     transport: str,
+    host: str,
+    port: int,
 ):
     """Run the Graph Manipulator MCP server.
 
@@ -514,12 +518,16 @@ def mcp_server(
         vector_db=str(vector_db),
     )
 
+    mcp.settings.host = host
+    mcp.settings.port = port
     click.echo(f"Starting MCP server ({transport} transport)...")
 
     if transport == "stdio":
         asyncio.run(mcp.run_stdio_async())
-    else:
+    elif transport == "sse":
         asyncio.run(mcp.run_sse_async())
+    else:
+        asyncio.run(mcp.run_streamable_http_async())
 
 
 if __name__ == "__main__":

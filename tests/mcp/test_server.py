@@ -394,6 +394,51 @@ class _LeakyStorage:
         }
 
 
+class _CapturingSearchStorage:
+    def __init__(self):
+        self.calls = []
+
+    def search_similar(self, query_embedding, node_types=None, limit: int = 10):
+        self.calls.append({"node_types": node_types, "limit": limit})
+        return [
+            {
+                "node_id": "person:melih",
+                "node_type": "Person",
+                "name": "Melih",
+                "summary": "s",
+                "score": 0.99,
+            }
+        ]
+
+
+class TestSearchEntitiesTool:
+    def test_search_entities_normalizes_string_node_types(self, monkeypatch):
+        storage = _CapturingSearchStorage()
+        monkeypatch.setattr(mcp_server, "storage", storage)
+        monkeypatch.setattr(mcp_server, "embedder", _FakeEmbedder())
+
+        result = mcp_server.search_entities(
+            "melih",
+            node_types="Person, Concept",
+            limit=3,
+        )
+
+        assert result["success"] is True
+        assert storage.calls == [{"node_types": ["Person", "Concept"], "limit": 3}]
+
+    async def test_search_entities_mcp_accepts_string_node_types(self, monkeypatch):
+        storage = _CapturingSearchStorage()
+        monkeypatch.setattr(mcp_server, "storage", storage)
+        monkeypatch.setattr(mcp_server, "embedder", _FakeEmbedder())
+
+        await mcp_server.mcp.call_tool(
+            "search_entities",
+            {"query": "melih", "node_types": "Person", "limit": 3},
+        )
+
+        assert storage.calls == [{"node_types": ["Person"], "limit": 3}]
+
+
 class TestPrivacyFiltering:
     """Ensure MCP never exposes internal embedding details."""
 
@@ -612,6 +657,37 @@ class TestCLIEntrypoint:
             pytest.skip("MCP script not found - not installed in dev mode")
 
         assert script.exists()
+
+
+class TestLazyEmbedderInitialization:
+    def test_init_server_defers_embedder_until_needed(self, monkeypatch, tmp_path):
+        class _Storage:
+            def ensure_vector_index(self):
+                return None
+
+        embedder_inits: list[str] = []
+
+        class _LazyEmbedder:
+            def __init__(self):
+                embedder_inits.append("init")
+
+            def embed(self, text: str) -> list[float]:
+                return [0.1] * 384
+
+        monkeypatch.setattr(mcp_server, "Neo4jStorage", lambda **_: _Storage())
+        monkeypatch.setattr(mcp_server, "VectorStore", lambda _: object())
+        monkeypatch.setattr(mcp_server, "NoteTracker", lambda _: object())
+        monkeypatch.setattr(mcp_server, "Embedder", _LazyEmbedder)
+
+        mcp_server.init_server(vector_db=str(tmp_path / "vectors.db"))
+
+        assert embedder_inits == []
+        assert mcp_server.embedder is None
+
+        emb = mcp_server._require_embedder()
+
+        assert embedder_inits == ["init"]
+        assert mcp_server.embedder is emb
 
 
 class TestSyncNoteToolIntegration:

@@ -188,6 +188,31 @@ This body should never appear inside embedding payload.
         assert embed_text == "Note: Routing Text. Compact summary. Tags: memory"
         assert "never appear" not in embed_text
 
+    def test_sync_lazily_builds_embedder_from_factory(self, workspace, storage):
+        """Embedder factory should only run when a sync needs embeddings."""
+        calls: list[str] = []
+
+        class _FactoryEmbedder:
+            def embed(self, text: str) -> list[float]:
+                calls.append(text)
+                return [0.1] * 384
+
+        def build_embedder():
+            calls.append("factory")
+            return _FactoryEmbedder()
+
+        synchronizer = NoteSynchronizer(storage, embedder_factory=build_embedder)
+        note_path = workspace / "Lazy Embedder.md"
+        note_path.write_text("# Lazy Embedder")
+
+        assert calls == []
+
+        result = synchronizer.sync_note_from_file(note_path)
+
+        assert result["success"] is True
+        assert calls[0] == "factory"
+        assert calls[1].startswith("Note: Lazy Embedder")
+
     def test_sync_node_id_uses_relative_path(self, synchronizer, workspace):
         """Node ID should be derived from vault-relative file path."""
         nested = workspace / "Folder A" / "Nested Note.md"

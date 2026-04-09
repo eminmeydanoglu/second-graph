@@ -3,7 +3,7 @@
 import json
 import logging
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Callable
 
 from ..parser.markdown import parse_note, ParsedNote
 from .neo4j_storage import Neo4jStorage
@@ -29,10 +29,15 @@ class NoteSynchronizer:
     def __init__(
         self,
         storage: Neo4jStorage,
-        embedder: Embedder,
+        embedder: Embedder | None = None,
+        *,
+        embedder_factory: Callable[[], Embedder] | None = None,
     ):
+        if embedder is None and embedder_factory is None:
+            raise ValueError("Either embedder or embedder_factory must be provided")
         self.storage = storage
         self.embedder = embedder
+        self.embedder_factory = embedder_factory
 
     def sync_note_from_file(
         self,
@@ -428,5 +433,13 @@ class NoteSynchronizer:
         }
         text = build_routing_text(node_type, props)
 
-        embedding = self.embedder.embed(text)
+        embedding = self._require_embedder().embed(text)
         self.storage.set_embedding(node_id, embedding)
+
+    def _require_embedder(self) -> Embedder:
+        """Get embedder or lazily create it via the configured factory."""
+        if self.embedder is None:
+            if self.embedder_factory is None:
+                raise RuntimeError("Embedder not configured")
+            self.embedder = self.embedder_factory()
+        return self.embedder
